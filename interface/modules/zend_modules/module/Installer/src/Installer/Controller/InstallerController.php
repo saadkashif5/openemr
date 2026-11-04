@@ -270,13 +270,23 @@ class InstallerController extends AbstractActionController
     }
 
     /**
+     * Directory of the module when it is a custom module (only those may ship a
+     * ModuleManagerListener), or null for any other kind.
+     */
+    public function getCustomModuleDirectory(int $modId): ?string
+    {
+        $registryEntry = $this->InstallerTable->getRegistryEntry($modId, "mod_directory");
+        return $registryEntry->type == InstModuleTable::MODULE_TYPE_CUSTOM ? $registryEntry->modDirectory : null;
+    }
+
+    /**
      * @param $action
      * @param $modId
      * @param $dirModule
      * @param $currentStatus
      * @return mixed
      */
-    private function notifyModuleListener($action, $modId, $dirModule, $currentStatus): mixed
+    public function notifyModuleListener($action, $modId, $dirModule, $currentStatus): mixed
     {
         $modPath = OEGlobalsBag::getInstance()->getProjectDir() . "/" . OEGlobalsBag::getInstance()->get('baseModDir') . "custom_modules/" . $dirModule;
         $moduleClassPath = $modPath . '/ModuleManagerListener.php';

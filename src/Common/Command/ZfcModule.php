@@ -120,6 +120,19 @@ class ZfcModule extends Command
 
         $output->writeln(sprintf('Running "%s" on module "%s"...', $modaction, $modname));
 
+        // Custom modules may ship a ModuleManagerListener that seeds settings and globals on
+        // install/enable. The Module Manager UI notifies it before and after every action, so do
+        // the same here or a module changed from the CLI is left half-configured.
+        $listenerDirectory = $controller->getCustomModuleDirectory($moduleId);
+        if ($listenerDirectory !== null) {
+            $preStatus = $controller->notifyModuleListener('pre' . $modaction, $moduleId, $listenerDirectory, 'Failure');
+            if ($preStatus === 'bypass_event') {
+                $output->writeln('Handled by the module itself.');
+                $output->writeln('Done.');
+                return 0;
+            }
+        }
+
         $result = match ($modaction) {
             'install_sql' => $controller->InstallModuleSQL($moduleId),
             'upgrade_sql' => $controller->UpgradeModuleSQL($moduleId),
@@ -133,6 +146,15 @@ class ZfcModule extends Command
             // before dispatching. Guards against that list drifting from these arms.
             default => throw new \LogicException(sprintf('Action "%s" is in MODULE_ACTIONS but has no dispatch arm.', $modaction)),
         };
+
+        if ($listenerDirectory !== null) {
+            $status = is_string($result) && $result !== '' ? $result : 'Success';
+            $listenerStatus = $controller->notifyModuleListener($modaction, $moduleId, $listenerDirectory, $status);
+            // The listener may replace the status text; keep array results (upgrade logs) as they are.
+            if (!is_array($result) && is_string($listenerStatus)) {
+                $result = $listenerStatus;
+            }
+        }
 
         foreach ($this->resultLines($result) as $line) {
             $output->writeln($line);

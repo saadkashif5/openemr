@@ -29,7 +29,9 @@
             $site_id = $valid_site_ids[0];
             break;
         default:
-            $site_id = filter_input(INPUT_GET, 'site') ?: (filter_input(INPUT_SERVER, 'HTTP_HOST') ?: 'default');
+            // Strip any port from the Host header (e.g. practice-a.localhost:8300) so it can match a site directory.
+            $host = preg_replace('/:\d+$/', '', filter_input(INPUT_SERVER, 'HTTP_HOST') ?: '');
+            $site_id = filter_input(INPUT_GET, 'site') ?: ($host ?: 'default');
             if (!in_array($site_id, $valid_site_ids, true)) {
                 throw new RuntimeException('Invalid site id');
             };

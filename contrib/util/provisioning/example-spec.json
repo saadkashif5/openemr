@@ -1,0 +1,15 @@
+{
+    "domain": "practice-c.localhost",
+    "name": "Practice C Family Medicine",
+    "specialty": "general",
+    "admin": {
+        "username": "admin_c",
+        "first_name": "Casey",
+        "last_name": "Admin",
+        "email": "admin@practice-c.example"
+    },
+    "globals": {
+        "language_default": "English (Standard)"
+    },
+    "modules": []
+}
