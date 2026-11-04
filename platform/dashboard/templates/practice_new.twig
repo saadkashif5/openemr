@@ -1,0 +1,43 @@
+{% extends 'base.twig' %}
+{% block title %}New practice{% endblock %}
+{% block content %}
+<h1>New practice</h1>
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+<form method="post" action="{{ base }}/practices" class="card form">
+    <input type="hidden" name="_csrf" value="{{ csrf }}">
+    <fieldset>
+        <legend>Practice</legend>
+        <label>Name <input name="name" required maxlength="100" value="{{ form.name }}"></label>
+        <label>Domain <input name="domain" required value="{{ form.domain }}" placeholder="clinic.example.com"></label>
+        <p class="note">Lowercase letters, digits, dots and hyphens. This becomes the practice's address and site id.</p>
+        <label>Specialty
+            <select name="specialty">
+                <option value="">None (generic practice)</option>
+                {% for s in specialties %}<option value="{{ s }}" {{ form.specialty == s ? 'selected' : '' }}>{{ s }}</option>{% endfor %}
+            </select>
+        </label>
+    </fieldset>
+    <fieldset>
+        <legend>First administrator</legend>
+        <label>Username <input name="admin_username" required value="{{ form.admin_username }}"></label>
+        <label>First name <input name="admin_first" value="{{ form.admin_first }}"></label>
+        <label>Last name <input name="admin_last" required value="{{ form.admin_last }}"></label>
+        <label>Email <input type="email" name="admin_email" value="{{ form.admin_email }}"></label>
+        <label class="check"><input type="checkbox" name="require_password_change" value="1" {{ form.require_password_change ? 'checked' : '' }}> Ask for a new password at first login</label>
+    </fieldset>
+    <fieldset>
+        <legend>Modules</legend>
+        {% for m in modules %}
+            <label class="check"><input type="checkbox" name="modules[]" value="{{ m }}" {{ m in form.modules ? 'checked' : '' }}> {{ m }}</label>
+        {% else %}
+            <p class="note">No optional modules are installed.</p>
+        {% endfor %}
+    </fieldset>
+    <fieldset>
+        <legend>How to create it</legend>
+        <label class="check"><input type="checkbox" name="clone" value="1" {{ form.clone ? 'checked' : '' }} {{ golden.status != 'current' ? 'disabled' : '' }}> Create from the golden database (faster)</label>
+        <p class="note">Golden database: {{ golden.status }}. {% if golden.status != 'current' %}Build it from the Practices page to use this option.{% endif %}</p>
+    </fieldset>
+    <button type="submit">Create practice</button>
+</form>
+{% endblock %}

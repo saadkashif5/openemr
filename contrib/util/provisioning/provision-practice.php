@@ -6,9 +6,11 @@
  * Each practice is one site: sites/<domain>/ plus its own database and database user. This wraps the
  * stock Installer so a practice can be created from a JSON spec without the setup wizard.
  *
- *   php provision-practice.php create  --spec=practice.json [--verify-url=http://localhost]
+ *   php provision-practice.php build-golden
+ *   php provision-practice.php create  --spec=practice.json [--clone] [--verify-url=http://localhost] [--secrets-file=PATH]
  *   php provision-practice.php status  <domain>
  *   php provision-practice.php list
+ *   php provision-practice.php reset-admin <domain> [--username=NAME] [--secrets-file=PATH]
  *   php provision-practice.php destroy <domain> --confirm=<domain>
  *
  * Safety: set OPENEMR_ENABLE_PROVISIONING=1 to enable, and run as the web server user (not root).
@@ -68,108 +70,7 @@ final readonly class DbServer
     }
 }
 
-/** A validated description of the practice to create. */
-final readonly class PracticeSpec
-{
-    /**
-     * @param array<string, string> $globals
-     * @param list<string> $modules
-     */
-    private function __construct(
-        public string $domain,
-        public string $name,
-        public string $adminUser,
-        public string $adminFirst,
-        public string $adminLast,
-        public string $adminEmail,
-        public string $specialty,
-        public array $globals,
-        public array $modules,
-        public string $dbName,
-        public string $dbUser,
-    ) {
-    }
-
-    /** @param array<mixed> $data */
-    public static function fromArray(array $data): self
-    {
-        $domain = self::str($data, 'domain');
-        if (!preg_match('/^(?=.{1,100}$)[a-z0-9]+(?:[.-][a-z0-9]+)*$/', $domain) || $domain === 'default') {
-            throw new InvalidArgumentException("domain must be lowercase letters, digits, dots and hyphens (and not 'default')");
-        }
-        $name = self::str($data, 'name');
-        if ($name === '' || strlen($name) > 100) {
-            throw new InvalidArgumentException('name is required (max 100 characters)');
-        }
-        $admin = $data['admin'] ?? null;
-        if (!is_array($admin)) {
-            throw new InvalidArgumentException('admin is required');
-        }
-        $adminUser = self::str($admin, 'username');
-        if (!preg_match('/^[A-Za-z0-9._-]{3,50}$/', $adminUser)) {
-            throw new InvalidArgumentException('admin.username must be 3-50 characters of A-Z a-z 0-9 . _ -');
-        }
-        $adminLast = self::str($admin, 'last_name');
-        if ($adminLast === '') {
-            throw new InvalidArgumentException('admin.last_name is required');
-        }
-        $adminEmail = self::str($admin, 'email');
-        if ($adminEmail !== '' && filter_var($adminEmail, FILTER_VALIDATE_EMAIL) === false) {
-            throw new InvalidArgumentException('admin.email is not a valid email address');
-        }
-        $specialty = self::str($data, 'specialty');
-        if ($specialty !== '' && !preg_match('/^[a-z0-9_-]+$/', $specialty)) {
-            throw new InvalidArgumentException('specialty must be lowercase letters, digits, _ or -');
-        }
-        $modules = $data['modules'] ?? [];
-        if (!is_array($modules) || !array_is_list($modules)) {
-            throw new InvalidArgumentException('modules must be a list of module directory names');
-        }
-        foreach ($modules as $module) {
-            if (!is_string($module) || !preg_match('/^[A-Za-z0-9._-]{1,64}$/', $module) || str_contains($module, '..')) {
-                throw new InvalidArgumentException('each module must be a directory name such as oe-module-weno');
-            }
-        }
-        $globals = [];
-        $rawGlobals = $data['globals'] ?? [];
-        if (!is_array($rawGlobals)) {
-            throw new InvalidArgumentException('globals must be an object of name: value');
-        }
-        foreach ($rawGlobals as $key => $value) {
-            if (!is_string($key) || !preg_match('/^[A-Za-z0-9_]+$/', $key) || !is_scalar($value)) {
-                throw new InvalidArgumentException('globals must map names (A-Z a-z 0-9 _) to scalar values');
-            }
-            $globals[$key] = (string) $value;
-        }
-
-        // Derived names: the hash keeps "a-b.com" and "a.b.com" apart; lengths fit MySQL's user/db limits.
-        $slug = trim((string) preg_replace('/[^a-z0-9]+/', '_', $domain), '_');
-        $hash = substr(sha1($domain), 0, 6);
-        return new self(
-            $domain,
-            $name,
-            $adminUser,
-            self::str($admin, 'first_name'),
-            $adminLast,
-            $adminEmail,
-            $specialty,
-            $globals,
-            array_values(array_unique($modules)),
-            'oe_' . substr($slug, 0, 40) . '_' . $hash,
-            'u_' . substr($slug, 0, 20) . '_' . $hash,
-        );
-    }
-
-    /** @param array<mixed> $data */
-    private static function str(array $data, string $key): string
-    {
-        $value = $data[$key] ?? '';
-        if (!is_string($value)) {
-            throw new InvalidArgumentException("$key must be a string");
-        }
-        return trim($value);
-    }
-}
+require_once __DIR__ . '/PracticeSpec.php';
 
 final class Provisioner
 {
@@ -190,7 +91,7 @@ final class Provisioner
     }
 
     /** @return array<string, mixed> */
-    public function create(PracticeSpec $spec, ?string $verifyUrl): array
+    public function create(PracticeSpec $spec, ?string $verifyUrl, ?string $secretsFile = null, bool $clone = false): array
     {
         $lock = $this->lock($spec->domain);
         try {
@@ -199,6 +100,9 @@ final class Provisioner
                 throw new PracticeExistsException("Practice {$spec->domain} is already provisioned");
             }
             $this->assertNothingLeftBehind($spec);
+            if ($clone) {
+                $this->assertGoldenCurrent();
+            }
 
             $state = [
                 'domain' => $spec->domain,
@@ -208,6 +112,8 @@ final class Provisioner
                 'db_name' => $spec->dbName,
                 'db_user' => $spec->dbUser,
                 'db_host' => $this->db->host,
+                'admin_user' => $spec->adminUser,
+                'method' => $clone ? 'clone' : 'install',
                 'created_at' => gmdate('c'),
                 'steps' => [],
             ];
@@ -216,14 +122,24 @@ final class Provisioner
 
             $dbPass = self::secret(32);
             $adminPass = self::secret(20);
+            $promptArmed = false;
+            $secretsHandle = self::reserveSecretsFile($secretsFile);
             try {
-                $this->step($state, 'install', fn() => $this->install($spec, $dbPass, $adminPass));
+                if ($clone) {
+                    $this->step($state, 'clone', fn() => $this->cloneFromGolden($spec, $dbPass, $adminPass));
+                } else {
+                    $this->step($state, 'install', fn() => $this->install($spec, $dbPass, $adminPass));
+                }
+                $this->step($state, 'seed', fn() => $this->applySeed($spec, $dbPass));
                 $this->step($state, 'overlay', fn() => $this->applyOverlay($spec));
                 $this->step($state, 'modules', fn() => $this->enableModules($spec));
                 $this->step($state, 'admin_profile', fn() => $this->setAdminProfile($spec, $dbPass));
+                $this->step($state, 'first_login_prompt', function () use ($spec, $dbPass, &$promptArmed): void {
+                    $promptArmed = $this->armPasswordChange($spec, $dbPass);
+                });
                 $this->step($state, 'verify_database', fn() => $this->verifyDatabase($spec, $dbPass));
                 if ($verifyUrl !== null) {
-                    $this->step($state, 'verify_login', fn() => $this->verifyLogin($verifyUrl, $spec, $adminPass));
+                    $this->step($state, 'verify_login', fn() => $this->verifyLogin($verifyUrl, $spec, $adminPass, $promptArmed));
                 }
             } catch (Throwable $e) {
                 $this->logger->error('Provisioning {domain} failed, rolling back', [
@@ -231,6 +147,7 @@ final class Provisioner
                     'exception' => $e,
                 ]);
                 $this->rollback($spec);
+                self::discardSecretsFile($secretsHandle, $secretsFile);
                 $state['status'] = 'failed';
                 $state['error'] = $e->getMessage();
                 $state['updated_at'] = gmdate('c');
@@ -249,8 +166,11 @@ final class Provisioner
                 'status' => 'active',
                 'login_path' => "/interface/login/login.php?site={$spec->domain}",
                 'database' => ['name' => $spec->dbName, 'user' => $spec->dbUser, 'host' => $this->db->host],
-                // Shown once and never stored: hand it to the practice admin and have them change it.
-                'admin' => ['username' => $spec->adminUser, 'initial_password' => $adminPass],
+                // Shown once and never stored: hand it to the practice admin securely.
+                'admin' => self::deliverSecret($spec->adminUser, $adminPass, $secretsHandle, $secretsFile),
+                'first_login' => $promptArmed
+                    ? 'The admin is asked to change the password on first login'
+                    : 'The initial password stays valid until it expires: no first-login prompt',
             ];
         } finally {
             flock($lock, LOCK_UN);
@@ -304,7 +224,12 @@ final class Provisioner
         return $out;
     }
 
-    private function install(PracticeSpec $spec, string $dbPass, string $adminPass): void
+    /**
+     * Settings written into a new practice: the specialty's, then the spec's own, then its name.
+     *
+     * @return array<string, array{value: string}>
+     */
+    private function customGlobals(PracticeSpec $spec): array
     {
         $globals = [];
         foreach ($this->templateGlobals($spec) as $key => $value) {
@@ -314,6 +239,12 @@ final class Provisioner
             $globals[$key] = ['value' => $value];
         }
         $globals['openemr_name'] = ['value' => $spec->name];
+        return $globals;
+    }
+
+    private function install(PracticeSpec $spec, string $dbPass, string $adminPass): void
+    {
+        $globals = $this->customGlobals($spec);
 
         $params = [
             'iuser' => $spec->adminUser,
@@ -341,6 +272,245 @@ final class Provisioner
         }
     }
 
+    private const GOLDEN_DB = 'oe_golden';
+    private const GOLDEN_USER = 'u_golden';
+    private const GOLDEN_SITE = 'golden-build';
+    private const GOLDEN_ADMIN = 'golden_admin';
+    private const GOLDEN_GROUP = 'Golden';
+
+    /**
+     * Install one reference database with the normal installer, to be copied for new practices.
+     * Installing is slow (about two minutes, nearly all of it loading the schema); copying a finished
+     * database takes seconds. Rebuild it after every OpenEMR upgrade: cloning refuses a stale one.
+     *
+     * @return array<string, mixed>
+     */
+    public function buildGolden(): array
+    {
+        $lock = $this->lock('golden');
+        try {
+            $started = microtime(true);
+            $this->dropDatabase(self::GOLDEN_DB);
+            $this->dropDatabaseUser(self::GOLDEN_USER);
+            $this->removeSiteDirectory(self::GOLDEN_SITE);
+            $this->audit('golden.build.start', 'golden');
+            try {
+                $installer = new Installer([
+                    'iuser' => self::GOLDEN_ADMIN,
+                    'iuname' => 'Golden',
+                    'iuserpass' => self::secret(24),
+                    'igroup' => self::GOLDEN_GROUP,
+                    'server' => $this->db->host,
+                    'port' => (string) $this->db->port,
+                    'root' => $this->db->rootUser,
+                    'rootpass' => $this->db->rootPass,
+                    'loginhost' => $this->db->loginHost,
+                    'login' => self::GOLDEN_USER,
+                    'pass' => self::secret(32),
+                    'dbname' => self::GOLDEN_DB,
+                    'collate' => 'utf8mb4_general_ci',
+                    'site' => self::GOLDEN_SITE,
+                    'source_site_id' => $this->templateSite,
+                ], $this->logger);
+                if (!$installer->quick_install()) {
+                    throw new RuntimeException('Installer failed: ' . $installer->error_message);
+                }
+            } catch (Throwable $e) {
+                $this->dropDatabase(self::GOLDEN_DB);
+                $this->dropDatabaseUser(self::GOLDEN_USER);
+                $this->removeSiteDirectory(self::GOLDEN_SITE);
+                $this->audit('golden.build.failed', 'golden');
+                throw $e;
+            }
+            // Only the root account reads the golden database, so its own user and site folder go.
+            $this->dropDatabaseUser(self::GOLDEN_USER);
+            $this->removeSiteDirectory(self::GOLDEN_SITE);
+
+            $version = $this->codeVersion();
+            $golden = [
+                'db_name' => self::GOLDEN_DB,
+                'version' => $version['label'],
+                'database' => $version['database'],
+                'built_at' => gmdate('c'),
+            ];
+            file_put_contents($this->stateDir . '/golden.state', json_encode($golden, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));
+            $this->audit('golden.build.ok', 'golden');
+            return $golden + ['seconds' => round(microtime(true) - $started, 1)];
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    /** @return array{label: string, database: int} */
+    private function codeVersion(): array
+    {
+        $root = $this->root;
+        return (function () use ($root): array {
+            require $root . '/version.php';
+            /** @var string $v_major */
+            /** @var string $v_minor */
+            /** @var string $v_patch */
+            /** @var int|string $v_database */
+            return ['label' => "$v_major.$v_minor.$v_patch", 'database' => (int) $v_database];
+        })();
+    }
+
+    /**
+     * The golden database must exist and match the code version exactly, or practices cloned from it
+     * would start out behind (or ahead of) the code they run on.
+     *
+     * @return array<string, mixed>
+     */
+    private function assertGoldenCurrent(): array
+    {
+        $file = $this->stateDir . '/golden.state';
+        $golden = is_file($file) ? json_decode((string) file_get_contents($file), true) : null;
+        if (!is_array($golden) || ($golden['db_name'] ?? '') !== self::GOLDEN_DB) {
+            throw new RuntimeException('No golden database yet: run "build-golden" first');
+        }
+        $version = $this->codeVersion();
+        if (($golden['version'] ?? '') !== $version['label'] || (int) ($golden['database'] ?? 0) !== $version['database']) {
+            throw new RuntimeException(
+                "The golden database is for {$golden['version']} but the code is {$version['label']}: run \"build-golden\" again"
+            );
+        }
+        $link = $this->db->connect();
+        $stmt = $link->prepare('SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?');
+        $name = self::GOLDEN_DB;
+        $stmt->bind_param('s', $name);
+        $stmt->execute();
+        $exists = $stmt->get_result()->num_rows > 0;
+        $link->close();
+        if (!$exists) {
+            throw new RuntimeException('The golden database is missing: run "build-golden" again');
+        }
+        return $golden;
+    }
+
+    /**
+     * Create the practice's database, user and site folder by copying the golden database, then give
+     * the copy this practice's identity. Replaces the installer for a new practice.
+     */
+    private function cloneFromGolden(PracticeSpec $spec, string $dbPass, string $adminPass): void
+    {
+        $source = self::GOLDEN_DB;
+        $link = $this->db->connect();
+        $link->query('SET SESSION foreign_key_checks = 0');
+        // Copy rows exactly as they are, including zero dates and ids of 0 that some seed rows use.
+        $link->query("SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'");
+
+        [$charset, $collation] = $link->query(
+            "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '$source'"
+        )->fetch_row() ?? throw new RuntimeException('Golden database not found');
+        if (!preg_match('/^[a-z0-9_]+$/', (string) $charset) || !preg_match('/^[a-z0-9_]+$/', (string) $collation)) {
+            throw new RuntimeException('Unexpected character set on the golden database');
+        }
+        $link->query("CREATE DATABASE `{$spec->dbName}` CHARACTER SET $charset COLLATE $collation");
+        $host = $link->real_escape_string($this->db->loginHost);
+        $link->query("CREATE USER '{$spec->dbUser}'@'$host' IDENTIFIED BY '" . $link->real_escape_string($dbPass) . "'");
+        $link->query("GRANT ALL PRIVILEGES ON `{$spec->dbName}`.* TO '{$spec->dbUser}'@'$host'");
+
+        $tables = [];
+        $result = $link->query(
+            "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = '$source' AND TABLE_TYPE = 'BASE TABLE'"
+        );
+        while ($row = $result->fetch_row()) {
+            if (!preg_match('/^[A-Za-z0-9_$]+$/', (string) $row[0])) {
+                throw new RuntimeException('Unexpected table name in the golden database');
+            }
+            $tables[] = (string) $row[0];
+        }
+        foreach ($tables as $table) {
+            $link->query("CREATE TABLE `{$spec->dbName}`.`$table` LIKE `$source`.`$table`");
+            $link->query("INSERT INTO `{$spec->dbName}`.`$table` SELECT * FROM `$source`.`$table`");
+        }
+        // A copy that silently lost rows would be worse than a failure, so compare every table.
+        foreach ($tables as $table) {
+            $expected = $link->query("SELECT COUNT(*) FROM `$source`.`$table`")->fetch_row()[0] ?? null;
+            $actual = $link->query("SELECT COUNT(*) FROM `{$spec->dbName}`.`$table`")->fetch_row()[0] ?? null;
+            if ($expected !== $actual) {
+                throw new RuntimeException("Clone check failed: table $table has $actual rows, expected $expected");
+            }
+        }
+        $link->select_db($spec->dbName);
+        $this->personalizeClone($link, $spec, $adminPass);
+        $link->close();
+
+        $this->createSiteDirectory($spec, $dbPass);
+    }
+
+    /** Replace the golden database's placeholder admin and name with this practice's. */
+    private function personalizeClone(mysqli $link, PracticeSpec $spec, string $adminPass): void
+    {
+        $hash = password_hash($adminPass, PASSWORD_DEFAULT);
+        $placeholder = self::GOLDEN_ADMIN;
+        $oldGroup = self::GOLDEN_GROUP;
+        $statements = [
+            ['UPDATE users SET username = ?, fname = ?, lname = ? WHERE username = ?', 'ssss',
+                [$spec->adminUser, $spec->adminFirst, $spec->adminLast, $placeholder]],
+            ['UPDATE users_secure SET username = ?, password = ?, last_update_password = NOW() WHERE username = ?', 'sss',
+                [$spec->adminUser, $hash, $placeholder]],
+            ['UPDATE `groups` SET name = ?, user = ? WHERE user = ? AND name = ?', 'ssss',
+                [$spec->name, $spec->adminUser, $placeholder, $oldGroup]],
+            ['UPDATE gacl_aro SET value = ?, name = ? WHERE value = ?', 'sss',
+                [$spec->adminUser, $spec->adminLast, $placeholder]],
+        ];
+        foreach ($statements as [$sql, $types, $params]) {
+            $stmt = $link->prepare($sql);
+            $stmt->bind_param($types, ...$params);
+            $stmt->execute();
+            if ($stmt->affected_rows < 1) {
+                throw new RuntimeException('Clone personalisation matched nothing for: ' . $sql);
+            }
+        }
+        $stmt = $link->prepare(
+            'INSERT INTO globals (gl_name, gl_index, gl_value) VALUES (?, 0, ?) ON DUPLICATE KEY UPDATE gl_value = VALUES(gl_value)'
+        );
+        foreach ($this->customGlobals($spec) as $name => $setting) {
+            $value = $setting['value'];
+            $stmt->bind_param('ss', $name, $value);
+            $stmt->execute();
+        }
+    }
+
+    /** Copy the site template to sites/<domain>/ and write this practice's sqlconf.php, as the installer does. */
+    private function createSiteDirectory(PracticeSpec $spec, string $dbPass): void
+    {
+        $src = "{$this->sitesDir}/{$this->templateSite}";
+        $dst = "{$this->sitesDir}/{$spec->domain}";
+        if (!mkdir($dst, 0775)) {
+            throw new RuntimeException("Cannot create $dst");
+        }
+        $items = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::SELF_FIRST
+        );
+        foreach ($items as $item) {
+            $target = $dst . '/' . substr($item->getPathname(), strlen($src) + 1);
+            if ($item->isDir()) {
+                mkdir($target, 0775, true);
+            } else {
+                copy($item->getPathname(), $target);
+            }
+        }
+        // The installer clears this folder so each practice makes its own encryption keys.
+        foreach (glob($dst . '/documents/logs_and_misc/methods/*') ?: [] as $file) {
+            unlink($file);
+        }
+        $conf = "<?php\n//  OpenEMR\n//  MySQL Config\n\n"
+            . "\$host\t= '{$this->db->host}';\n\$port\t= '{$this->db->port}';\n"
+            . "\$login\t= '{$spec->dbUser}';\n\$pass\t= '$dbPass';\n\$dbase\t= '{$spec->dbName}';\n\n"
+            . "\$sqlconf = array();\nglobal \$sqlconf;\n\$sqlconf[\"host\"]= \$host;\n\$sqlconf[\"port\"] = \$port;\n"
+            . "\$sqlconf[\"login\"] = \$login;\n\$sqlconf[\"pass\"] = \$pass;\n\$sqlconf[\"dbase\"] = \$dbase;\n\n"
+            . "//////////////////////////\n//////////////////////////\n//////////////////////////\n"
+            . "//////DO NOT TOUCH THIS///\n\$config = 1; /////////////\n"
+            . "//////////////////////////\n//////////////////////////\n//////////////////////////\n?>\n";
+        if (file_put_contents($dst . '/sqlconf.php', $conf) === false) {
+            throw new RuntimeException('Cannot write sqlconf.php');
+        }
+    }
+
     /** @return array<string, string> */
     private function templateGlobals(PracticeSpec $spec): array
     {
@@ -362,6 +532,32 @@ final class Provisioner
             }
         }
         return $out;
+    }
+
+    /**
+     * Run templates/<specialty>/seed.sql in the new practice's database: custom forms, lists and
+     * other data a specialty starts with. The file comes from the repository (not from the spec) and
+     * runs as the practice's own database user, so it can only ever touch that practice.
+     */
+    private function applySeed(PracticeSpec $spec, string $dbPass): void
+    {
+        if ($spec->specialty === '') {
+            return;
+        }
+        $file = "{$this->templatesDir}/{$spec->specialty}/seed.sql";
+        if (!is_file($file)) {
+            return;
+        }
+        $link = $this->db->connect($spec->dbUser, $dbPass, $spec->dbName);
+        // multi_query stops at the first failing statement, and strict mode raises it when we move on.
+        $link->multi_query((string) file_get_contents($file));
+        do {
+            $result = $link->store_result();
+            if ($result instanceof mysqli_result) {
+                $result->free();
+            }
+        } while ($link->more_results() && $link->next_result());
+        $link->close();
     }
 
     /** Copy templates/<specialty>/site/** over the new site directory (form layouts, logos, ...). */
@@ -440,6 +636,140 @@ final class Provisioner
         return $stdout;
     }
 
+    /**
+     * Make the admin's first login open OpenEMR's own "Password Reset" tab, by dating the password as
+     * if it were set a full expiry period ago. The prompt is built in and needs no core change, but
+     * it is a prompt, not a lock: the admin can dismiss it until the grace period ends.
+     * Returns false when the practice has password expiry switched off, so nothing can be prompted.
+     */
+    private function armPasswordChange(PracticeSpec $spec, string $dbPass): bool
+    {
+        if (!$spec->requirePasswordChange) {
+            return false;
+        }
+        $link = $this->db->connect($spec->dbUser, $dbPass, $spec->dbName);
+        $armed = $this->backdatePassword($link, $spec->adminUser);
+        $link->close();
+        if (!$armed) {
+            $this->logger->warning('Password expiry is off for {domain}: no first-login prompt', ['domain' => $spec->domain]);
+        }
+        return $armed;
+    }
+
+    private function backdatePassword(mysqli $link, string $username): bool
+    {
+        $row = $link->query("SELECT gl_value FROM globals WHERE gl_name = 'password_expiration_days' AND gl_index = 0")->fetch_row();
+        $days = (int) ($row[0] ?? 0);
+        if ($days <= 0) {
+            return false;
+        }
+        $stmt = $link->prepare('UPDATE users_secure SET last_update_password = DATE_SUB(NOW(), INTERVAL ? DAY) WHERE username = ?');
+        $stmt->bind_param('is', $days, $username);
+        $stmt->execute();
+        return $stmt->affected_rows === 1;
+    }
+
+    /**
+     * Give a practice's admin a new random password (for a lost or never-delivered one) and re-arm the
+     * first-login prompt. Works on the database directly, using the same hashing as the installer.
+     *
+     * @return array<string, mixed>
+     */
+    public function resetAdmin(string $domain, ?string $username, ?string $secretsFile): array
+    {
+        $lock = $this->lock($domain);
+        try {
+            $state = $this->readState($domain);
+            if ($state === null || ($state['status'] ?? '') !== 'active') {
+                throw new RuntimeException("$domain is not an active provisioned practice");
+            }
+            $username ??= is_string($state['admin_user'] ?? null) ? $state['admin_user'] : null;
+            if ($username === null || !preg_match('/^[A-Za-z0-9._-]{3,50}$/', $username)) {
+                throw new InvalidArgumentException('This practice has no recorded admin: pass --username=');
+            }
+            $secretsHandle = self::reserveSecretsFile($secretsFile);
+            try {
+                $password = self::secret(20);
+                $hash = password_hash($password, PASSWORD_DEFAULT);
+                $link = $this->db->connect(null, null, (string) $state['db_name']);
+                // Clearing the history and the failed-login counters means the new password is accepted
+                // and an account locked out by earlier attempts can sign in again.
+                $stmt = $link->prepare(
+                    'UPDATE users_secure SET password = ?, last_update_password = NOW(), password_history1 = NULL,'
+                    . ' password_history2 = NULL, password_history3 = NULL, password_history4 = NULL,'
+                    . ' login_fail_counter = 0, last_login_fail = NULL WHERE username = ?'
+                );
+                $stmt->bind_param('ss', $hash, $username);
+                $stmt->execute();
+                if ($stmt->affected_rows !== 1) {
+                    throw new RuntimeException("No user $username in $domain");
+                }
+                $armed = $this->backdatePassword($link, $username);
+                $link->close();
+            } catch (Throwable $e) {
+                self::discardSecretsFile($secretsHandle, $secretsFile);
+                throw $e;
+            }
+            $this->audit('reset-admin', $domain);
+            return [
+                'domain' => $domain,
+                'admin' => self::deliverSecret($username, $password, $secretsHandle, $secretsFile),
+                'first_login' => $armed
+                    ? 'The admin is asked to change the password on first login'
+                    : 'Password expiry is off for this practice: no first-login prompt',
+            ];
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    /**
+     * Create the secrets file (new, owner-only) BEFORE anything is changed, so a bad path can never
+     * leave a password changed in the database but not delivered anywhere.
+     *
+     * @return resource|null
+     */
+    private static function reserveSecretsFile(?string $file)
+    {
+        if ($file === null) {
+            return null;
+        }
+        $old = umask(0177);
+        $handle = @fopen($file, 'x');
+        umask($old);
+        if ($handle === false) {
+            throw new RuntimeException("Cannot create $file (its folder must exist and the file must not)");
+        }
+        return $handle;
+    }
+
+    /** @param resource|null $handle */
+    private static function discardSecretsFile($handle, ?string $file): void
+    {
+        if ($handle !== null && $file !== null) {
+            fclose($handle);
+            @unlink($file);
+        }
+    }
+
+    /**
+     * Print the secret in the result, or, with a reserved file, write it there and leave it out of
+     * the output so it does not end up in logs or a terminal history.
+     *
+     * @param resource|null $handle
+     * @return array<string, string>
+     */
+    private static function deliverSecret(string $username, string $password, $handle, ?string $file): array
+    {
+        if ($handle === null || $file === null) {
+            return ['username' => $username, 'initial_password' => $password];
+        }
+        fwrite($handle, json_encode(['username' => $username, 'initial_password' => $password], JSON_THROW_ON_ERROR) . "\n");
+        fclose($handle);
+        return ['username' => $username, 'initial_password_file' => $file];
+    }
+
     private function setAdminProfile(PracticeSpec $spec, string $dbPass): void
     {
         if ($spec->adminEmail === '') {
@@ -491,7 +821,7 @@ final class Provisioner
     }
 
     /** Fetch the login page and sign in as the new admin, sending Host: <domain> to $baseUrl. */
-    private function verifyLogin(string $baseUrl, PracticeSpec $spec, string $adminPass): void
+    private function verifyLogin(string $baseUrl, PracticeSpec $spec, string $adminPass, bool $expectPrompt): void
     {
         $jar = tempnam(sys_get_temp_dir(), 'prov');
         $request = function (string $url, ?array $post = null) use ($jar, $spec): array {
@@ -533,6 +863,15 @@ final class Provisioner
             if ($status !== 302 || !preg_match('/^Location:.*main\.php/mi', $headers)) {
                 throw new RuntimeException("Admin login check failed (HTTP $status)");
             }
+            // Open the page login sends the admin to and check whether the password-reset tab is there.
+            preg_match('/^Location:\s*(\S+)/mi', $headers, $m);
+            $target = (string) parse_url($m[1] ?? '', PHP_URL_PATH) . '?' . (string) parse_url($m[1] ?? '', PHP_URL_QUERY);
+            [$status, , $body] = $request($base . $target);
+            $hasPrompt = str_contains($body, 'pwd_expires_alert');
+            if ($status !== 200 || $hasPrompt !== $expectPrompt) {
+                throw new RuntimeException('First-login check failed: password prompt '
+                    . ($hasPrompt ? 'shown' : 'missing') . ' but ' . ($expectPrompt ? 'expected' : 'not expected'));
+            }
         } finally {
             @unlink($jar);
         }
@@ -541,13 +880,29 @@ final class Provisioner
     /** Remove whatever this practice owns: database, database user, site directory. Safe to repeat. */
     private function rollback(PracticeSpec $spec): void
     {
-        $link = $this->db->connect();
-        $link->query('DROP DATABASE IF EXISTS `' . $spec->dbName . '`');
-        $host = $link->real_escape_string($this->db->loginHost);
-        $link->query("DROP USER IF EXISTS '{$spec->dbUser}'@'{$host}'");
-        $link->close();
+        $this->dropDatabase($spec->dbName);
+        $this->dropDatabaseUser($spec->dbUser);
+        $this->removeSiteDirectory($spec->domain);
+    }
 
-        $dir = "{$this->sitesDir}/{$spec->domain}";
+    private function dropDatabase(string $dbName): void
+    {
+        $link = $this->db->connect();
+        $link->query('DROP DATABASE IF EXISTS `' . $dbName . '`');
+        $link->close();
+    }
+
+    private function dropDatabaseUser(string $dbUser): void
+    {
+        $link = $this->db->connect();
+        $host = $link->real_escape_string($this->db->loginHost);
+        $link->query("DROP USER IF EXISTS '{$dbUser}'@'{$host}'");
+        $link->close();
+    }
+
+    private function removeSiteDirectory(string $domain): void
+    {
+        $dir = "{$this->sitesDir}/{$domain}";
         $real = realpath($dir);
         // Only ever delete a direct child of sites/, and never the template or default site.
         if (
@@ -680,8 +1035,8 @@ function parseArgs(array $argv): array
     $positional = [];
     $options = [];
     foreach (array_slice($argv, 1) as $arg) {
-        if (preg_match('/^--([a-z-]+)=(.*)$/s', $arg, $m)) {
-            $options[$m[1]] = $m[2];
+        if (preg_match('/^--([a-z-]+)(?:=(.*))?$/s', $arg, $m)) {
+            $options[$m[1]] = $m[2] ?? '1';
         } else {
             $positional[] = $arg;
         }
@@ -741,13 +1096,19 @@ try {
             } catch (InvalidArgumentException $e) {
                 fail('Invalid spec: ' . $e->getMessage(), 2);
             }
-            return $provisioner->create($spec, $opts['verify-url'] ?? null);
+            return $provisioner->create($spec, $opts['verify-url'] ?? null, $opts['secrets-file'] ?? null, isset($opts['clone']));
         })(),
         'status' => $provisioner->status($args[1] ?? fail('status needs a domain', 2))
             ?? fail('Unknown practice', 1),
         'list' => array_map(
             fn(array $s): array => array_intersect_key($s, array_flip(['domain', 'name', 'specialty', 'status', 'updated_at'])),
             $provisioner->all()
+        ),
+        'build-golden' => $provisioner->buildGolden(),
+        'reset-admin' => $provisioner->resetAdmin(
+            $args[1] ?? fail('reset-admin needs a domain', 2),
+            $opts['username'] ?? null,
+            $opts['secrets-file'] ?? null
         ),
         'destroy' => (function () use ($provisioner, $args, $opts): array {
             $domain = $args[1] ?? fail('destroy needs a domain', 2);
@@ -756,7 +1117,7 @@ try {
             }
             return $provisioner->destroy($domain);
         })(),
-        default => fail("Usage: provision-practice.php create|status|list|destroy (see header of this file)", 2),
+        default => fail("Usage: provision-practice.php create|build-golden|status|list|reset-admin|destroy (see header of this file)", 2),
     };
     echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";
 } catch (PracticeExistsException $e) {

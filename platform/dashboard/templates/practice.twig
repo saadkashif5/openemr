@@ -1,0 +1,63 @@
+{% extends 'base.twig' %}
+{% block title %}{{ p.domain }}{% endblock %}
+{% block content %}
+<div class="row">
+    <h1>{{ p.name }} <span class="badge {{ p.status }}">{{ p.status }}</span></h1>
+</div>
+<dl class="facts">
+    <dt>Domain</dt><dd>{{ p.domain }}</dd>
+    <dt>Specialty</dt><dd>{{ p.specialty ?: 'none' }}</dd>
+    <dt>Created</dt><dd>{{ p.created_at|slice(0, 16)|replace({'T': ' '}) }} UTC, by {{ p.method ?? 'install' }}</dd>
+    <dt>Database</dt><dd>{{ p.db_name }}</dd>
+    <dt>Administrator</dt><dd>{{ p.admin_user ?? 'not recorded' }}</dd>
+    {% if p.error is defined %}<dt>Error</dt><dd class="error-text">{{ p.error }}</dd>{% endif %}
+</dl>
+
+<h2>Steps</h2>
+<table>
+    <thead><tr><th>Step</th><th>Result</th><th>Seconds</th></tr></thead>
+    <tbody>
+    {% for name, step in p.steps %}
+        <tr><td>{{ name }}</td><td><span class="badge {{ step.status }}">{{ step.status }}</span></td><td>{{ step.seconds }}</td></tr>
+    {% else %}
+        <tr><td colspan="3" class="empty">No steps recorded.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% if p.status == 'active' and (perms.reset_admin or perms.destroy) %}
+<h2>Actions</h2>
+<div class="card">
+    {% if perms.reset_admin %}
+    <form method="post" action="{{ base }}/practices/{{ p.domain }}/reset-admin">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        {% if p.admin_user is not defined %}<label>Administrator username <input name="username" required></label>{% endif %}
+        <button type="submit">Reset admin password</button>
+        <p class="note">Sets a new random password for the practice's first administrator. You reveal it once on the job page.</p>
+    </form>
+    {% endif %}
+    {% if perms.destroy %}
+    <form method="post" action="{{ base }}/practices/{{ p.domain }}/destroy" class="danger">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <label>Type <strong>{{ p.domain }}</strong> to permanently delete this practice, its database and its files
+            <input name="confirm" autocomplete="off" required>
+        </label>
+        <button type="submit" class="danger">Delete practice</button>
+    </form>
+    {% endif %}
+</div>
+{% endif %}
+
+<h2>Jobs for this practice</h2>
+<table>
+    <thead><tr><th>#</th><th>Type</th><th>Status</th><th>Requested</th></tr></thead>
+    <tbody>
+    {% for j in jobs %}
+        <tr><td><a href="{{ base }}/jobs/{{ j.id }}">{{ j.id }}</a></td><td>{{ j.type }}</td>
+        <td><span class="badge {{ j.status }}">{{ j.status }}</span></td><td>{{ j.created_at|slice(0, 16) }} UTC</td></tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">No jobs.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

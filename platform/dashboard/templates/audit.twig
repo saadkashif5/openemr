@@ -1,0 +1,15 @@
+{% extends 'base.twig' %}
+{% block title %}Audit log{% endblock %}
+{% block content %}
+<h1>Audit log</h1>
+<table>
+    <thead><tr><th>When (UTC)</th><th>Who</th><th>Action</th><th>Target</th><th>Detail</th><th>IP</th></tr></thead>
+    <tbody>
+    {% for e in entries %}
+        <tr><td>{{ e.at }}</td><td>{{ e.operator_email ?: '-' }}</td><td>{{ e.action }}</td><td>{{ e.target ?: '-' }}</td><td class="detail">{{ e.detail ?: '' }}</td><td>{{ e.ip ?: '-' }}</td></tr>
+    {% else %}
+        <tr><td colspan="6" class="empty">Nothing recorded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

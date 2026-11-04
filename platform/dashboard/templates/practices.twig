@@ -1,0 +1,58 @@
+{% extends 'base.twig' %}
+{% block title %}Practices{% endblock %}
+{% block content %}
+<div class="row">
+    <h1>Practices <span class="count">{{ practices|length }}</span></h1>
+    {% if perms.create %}<a class="button" href="{{ base }}/practices/new">New practice</a>{% endif %}
+</div>
+<table>
+    <thead><tr><th>Domain</th><th>Name</th><th>Specialty</th><th>Status</th><th>Created</th></tr></thead>
+    <tbody>
+    {% for p in practices %}
+        <tr>
+            <td><a href="{{ base }}/practices/{{ p.domain }}">{{ p.domain }}</a></td>
+            <td>{{ p.name }}</td>
+            <td>{{ p.specialty ?: 'none' }}</td>
+            <td><span class="badge {{ p.status }}">{{ p.status }}</span></td>
+            <td>{{ p.created_at|slice(0, 16)|replace({'T': ' '}) }} UTC</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="5" class="empty">No practices yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+<h2>Golden database</h2>
+<div class="card">
+    <p>
+        Status: <span class="badge {{ golden.status }}">{{ golden.status }}</span>
+        {% if golden.version %}built for {{ golden.version }} at {{ golden.built_at|slice(0, 16)|replace({'T': ' '}) }} UTC;{% endif %}
+        code is {{ golden.code }}.
+    </p>
+    <p class="note">A current golden database lets new practices be created by copying it, which is faster than a full install. Rebuild it after every OpenEMR upgrade.</p>
+    {% if perms.build_golden %}
+    <form method="post" action="{{ base }}/golden/build">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <button type="submit">{{ golden.status == 'current' ? 'Rebuild' : 'Build' }} golden database</button>
+    </form>
+    {% endif %}
+</div>
+
+<h2>Recent jobs</h2>
+<table>
+    <thead><tr><th>#</th><th>Type</th><th>Practice</th><th>Status</th><th>Requested</th></tr></thead>
+    <tbody>
+    {% for j in jobs %}
+        <tr>
+            <td><a href="{{ base }}/jobs/{{ j.id }}">{{ j.id }}</a></td>
+            <td>{{ j.type }}</td>
+            <td>{{ j.domain ?: '-' }}</td>
+            <td><span class="badge {{ j.status }}">{{ j.status }}</span></td>
+            <td>{{ j.created_at|slice(0, 16) }} UTC</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="5" class="empty">No jobs yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

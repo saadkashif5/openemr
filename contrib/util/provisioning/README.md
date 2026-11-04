@@ -38,14 +38,70 @@ See `example-spec.json`. `domain` becomes the site id (lowercase letters, digits
 2. Generate random database and admin passwords.
 3. Run the stock `Installer`: create database and user, load schema, copy the template site directory,
    write `sqlconf.php`, create the admin and the access-control roles, apply `globals`.
-4. Apply the specialty template, if `templates/<specialty>/` exists:
-   `globals.json` (settings) and `site/` (files copied over the new site directory, e.g. `LBF/`).
+4. Apply the specialty template, if `templates/<specialty>/` exists (each part is optional):
+   - `seed.sql`: run in the new practice's database, as its own database user. Use it for custom
+     encounter forms, dropdown lists and other starting data. A failing statement rolls back the
+     whole practice.
+   - `globals.json`: OpenEMR settings, applied at install time.
+   - `site/`: files copied over the new site directory, e.g. logos or `LBF/` plugin files.
+
+   `templates/general/` is the first real one (see its README).
 5. Set the admin email.
 6. Verify in the database (admin exists, has a password, is in an access-control group) and, with
    `--verify-url`, fetch the login page and sign in as the new admin.
 
 If any step fails, the database, user and site directory are removed and the practice is recorded as
 `failed`; run `create` again. Concurrent operations on the same domain are blocked by a lock file.
+
+## Faster creates: clone a golden database
+
+A normal `create` runs the installer, and loading the schema is about 90% of its time. With a golden
+database, a new practice is a server-side copy of one finished install instead:
+
+```bash
+php provision-practice.php build-golden                  # once, and again after every OpenEMR upgrade
+php provision-practice.php create --spec=practice.json --clone
+```
+
+`build-golden` installs a reference database (`oe_golden`) with a placeholder admin and records the
+version it was built for. `create --clone` copies every table, checks each table's row count, gives
+the copy the practice's own admin, name and settings, and then carries on with the same steps as an
+install (specialty seed, modules, first-login prompt, verification).
+
+- **It refuses a stale golden database.** If the code version no longer matches the one recorded,
+  nothing is created and it tells you to run `build-golden` again, so no practice starts out behind.
+- **What I checked** (local Docker, one clone against the golden database and an installer-made
+  practice): identical schema, no leftover placeholder names, the same access-control rows, and the
+  admin can log in. A fresh database has no UUIDs and no encrypted values, so there is nothing to
+  regenerate; if a future version adds some, `personalizeClone()` must handle them.
+- **Speed.** Locally an install takes about 123 seconds and a clone about 58, of which 41 are the 286
+  `CREATE TABLE` statements (about 145 ms each on Docker Desktop for Windows) and 12 are the data
+  copy. Those are disk-bound numbers; measure again on the real database server before relying on
+  them.
+- `golden.state` lives in the state directory. Practices record whether they were `install`ed or
+  `clone`d in their state file.
+
+## Admin onboarding
+
+Each practice gets a random initial password for its first admin. How it reaches that person is up
+to whatever drives this script (the future dashboard): do not email it in plain text.
+
+- By default `create` prints it in the JSON result. With `--secrets-file=PATH` it is written to a new
+  owner-only file instead and left out of the output and logs. The file is created before anything
+  else changes and the path must not already exist.
+- **First login.** OpenEMR has no "must change at first login" lock for staff, but it does open a
+  "Password Reset" tab first when a password is older than the practice's expiry setting (180 days by
+  default). `create` dates the admin's password as if it were that old, so the admin is prompted
+  straight away. It is a prompt, not a lock: it can be dismissed during the 30-day grace period. The
+  login check in `--verify-url` confirms the tab really appears. Set
+  `"admin": {"require_password_change": false}` to skip it, and note that a practice with password
+  expiry switched off (0 days) cannot be prompted.
+- **Lost or undelivered password:** `reset-admin <domain> [--username=NAME] [--secrets-file=PATH]`
+  sets a new random password, clears the failed-login counters and password history, and re-arms the
+  first-login prompt. `--username` is only needed for practices created before the admin name was
+  recorded in the state file.
+- No invite links: OpenEMR has none for staff (its one-time links are for patients in the portal).
+  Building them is a job for the dashboard, which can call `reset-admin` and deliver the result.
 
 ## Site template
 

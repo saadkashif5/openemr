@@ -1,0 +1,10 @@
+{% extends 'base.twig' %}
+{% block title %}Initial password{% endblock %}
+{% block content %}
+<section class="narrow card">
+    <h1>Initial password for {{ domain }}</h1>
+    <p class="note">Copy this now. It has been deleted from the server and cannot be shown again. Pass it to the practice administrator through a secure channel.</p>
+    <dl class="facts"><dt>Username</dt><dd>{{ username }}</dd><dt>Password</dt><dd class="secret">{{ password }}</dd></dl>
+    <p><a href="{{ base }}/practices/{{ domain }}">Back to the practice</a></p>
+</section>
+{% endblock %}

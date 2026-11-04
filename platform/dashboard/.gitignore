@@ -1,0 +1,3 @@
+# Local configuration, secrets and scratch files are never committed.
+/var/*
+!/var/.gitkeep

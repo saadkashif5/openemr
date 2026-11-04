@@ -1,0 +1,42 @@
+{% extends 'base.twig' %}
+{% block title %}Job {{ job.id }}{% endblock %}
+{% block head %}{% if active %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block content %}
+<div class="row">
+    <h1>Job {{ job.id }}: {{ job.type }} <span class="badge {{ job.status }}">{{ job.status }}</span></h1>
+    {% if job.domain %}<a class="button secondary" href="{{ base }}/practices/{{ job.domain }}">Practice</a>{% endif %}
+</div>
+{% if active %}<p class="note">This page refreshes by itself while the job runs. A full install takes about two minutes; a copy from the golden database about one.</p>{% endif %}
+<dl class="facts">
+    <dt>Practice</dt><dd>{{ job.domain ?: '-' }}</dd>
+    <dt>Requested</dt><dd>{{ job.created_at }} UTC by {{ job.requested_by_email ?? 'unknown' }}</dd>
+    <dt>Started</dt><dd>{{ job.started_at ?? 'waiting for the worker' }}</dd>
+    <dt>Finished</dt><dd>{{ job.finished_at ?? '-' }}</dd>
+</dl>
+
+{% if job.error %}<p class="flash error">{{ job.error }}</p>{% endif %}
+
+{% if steps %}
+<h2>Steps</h2>
+<table>
+    <thead><tr><th>Step</th><th>Result</th><th>Seconds</th></tr></thead>
+    <tbody>{% for name, step in steps %}<tr><td>{{ name }}</td><td><span class="badge {{ step.status }}">{{ step.status }}</span></td><td>{{ step.seconds }}</td></tr>{% endfor %}</tbody>
+</table>
+{% endif %}
+
+{% if result %}
+<h2>Result</h2>
+<pre>{{ result|json_encode(constant('JSON_PRETTY_PRINT')) }}</pre>
+{% endif %}
+
+{% if canReveal %}
+<h2>Initial administrator password</h2>
+<form method="post" action="{{ base }}/jobs/{{ job.id }}/reveal" class="card">
+    <input type="hidden" name="_csrf" value="{{ csrf }}">
+    <p>The password is shown once and then deleted. It is not stored anywhere else, and revealing it is recorded in the audit log.</p>
+    <button type="submit">Reveal password</button>
+</form>
+{% elseif job.secret_revealed_at %}
+<p class="note">The initial password was revealed at {{ job.secret_revealed_at }} UTC.</p>
+{% endif %}
+{% endblock %}

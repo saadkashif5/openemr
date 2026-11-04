@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Dashboard{% endblock %} · Practice platform</title>
+    <link rel="stylesheet" href="{{ assets }}/style.css">
+    {% block head %}{% endblock %}
+</head>
+<body>
+{% if operator %}
+<header class="top">
+    <a class="brand" href="{{ base }}/practices">Practice platform</a>
+    <nav>
+        <a href="{{ base }}/practices">Practices</a>
+        {% if perms.create %}<a href="{{ base }}/practices/new">New practice</a>{% endif %}
+        {% if perms.audit %}<a href="{{ base }}/audit">Audit log</a>{% endif %}
+        <a href="{{ base }}/account/password">Password</a>
+    </nav>
+    <form class="signout" method="post" action="{{ base }}/logout">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <span class="who">{{ operator.name }} · {{ operator.role }}</span>
+        <button type="submit" class="link">Sign out</button>
+    </form>
+</header>
+{% endif %}
+<main>
+    {% if flash %}<p class="flash {{ flash.error ? 'error' : 'ok' }}">{{ flash.message }}</p>{% endif %}
+    {% block content %}{% endblock %}
+</main>
+</body>
+</html>

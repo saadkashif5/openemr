@@ -1,0 +1,36 @@
+# Platform routing and protection.
+#
+# The Apache config allows only FileInfo overrides (mod_rewrite) in .htaccess files, and ignores
+# .htaccess inside sites/ completely, so these rules live here at the top level.
+# In production also do this at the load balancer (route the admin host to the dashboard service) and
+# deny the internal paths in the Apache config itself, or keep the provisioning state outside the web
+# root by setting PROVISION_STATE_DIR.
+#
+# Known gap: apis/ and oauth2/ have their own .htaccess, which takes priority over this file, so on
+# the admin host those two folders still answer (OAuth-protected, as on every practice domain). The
+# load balancer rule above is what closes that.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # --- Always blocked --------------------------------------------------------------------------
+    # Provisioning records: practices, database names, admin usernames, audit log.
+    RewriteRule ^sites/\.provisioning(/|$) - [F,L]
+    # Dashboard internals (source, templates, schema, config, secrets, command-line tools).
+    RewriteRule ^platform/dashboard/(?!public/) - [F,L]
+
+    # --- The dashboard lives on admin.<domain> and nowhere else --------------------------------------
+    # Any other host (every practice domain, localhost) cannot reach it by path.
+    RewriteCond %{HTTP_HOST} !^admin\. [NC]
+    RewriteRule ^platform/dashboard/ - [F,L]
+
+    # On the admin host a file in the dashboard's public folder (the stylesheet) is served as it is...
+    RewriteCond %{HTTP_HOST} ^admin\. [NC]
+    RewriteCond %{REQUEST_URI} !^/platform/dashboard/public/
+    RewriteCond %{DOCUMENT_ROOT}/platform/dashboard/public/$1 -f
+    RewriteRule ^(.+)$ platform/dashboard/public/$1 [L]
+
+    # ...and everything else on that host goes to the dashboard. OpenEMR itself is not served there.
+    RewriteCond %{HTTP_HOST} ^admin\. [NC]
+    RewriteCond %{REQUEST_URI} !^/platform/dashboard/public/
+    RewriteRule ^(.*)$ platform/dashboard/public/index.php/$1 [L]
+</IfModule>
