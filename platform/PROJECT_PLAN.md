@@ -414,6 +414,7 @@ Format: **ID Title** · Size · Priority · Milestone · depends on. Then descri
 - **TEN-03 Create the platform module skeleton** · S · P1 · M1 · depends: none
   Custom OpenEMR module `oe-module-platform`, enabled in every practice by provisioning, holding our endpoints and the shell launcher.
   Done when: enabled on a new practice; a health endpoint returns the session user.
+  **Status (6 Nov 2026): done and verified in the local stack; reaches the pilot server with the next image rebuild.** Module in `interface/modules/custom_modules/oe-module-platform/`; provisioning always installs and enables it. Verified: a new practice with no modules listed has it active (`mod_active = 1`); `health.php` returns 401 signed out, 200 with the user signed in, 405 for POST; 4 unit tests pass. Existing practices (before this change) do not have it; TEN-04 adds it to them.
 - **TEN-04 Add the platform-admin account with guard** · L · P1 · M1 · depends: TEN-03, INF-02
   Create hidden user `platform-admin` in every practice (and add it to existing ones): in Administrators, not a provider, random password never stored. Add database triggers that stop practice admins changing or removing it, remove the TRIGGER privilege from practice database users, and hide it from the Users list with a documented core patch.
   Done when: a practice admin cannot see, change or remove the account; the worker can still rotate its password; login counters still update.
