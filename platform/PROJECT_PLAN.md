@@ -247,10 +247,51 @@ practice DB users without TRIGGER (TEN-04). Timings here are slow because of Doc
 
 Image architectures: `openemr/openemr` and `mysql:8.4` are both published for amd64 and arm64.
 
-**Still to run on AWS (needs INF-01):** app image on ARM (t4g) and x86 (t3 or similar) EC2, and the
-same checks against RDS for MySQL 8.4. On RDS the master user is not SUPER, so confirm triggers can
-be created (parameter group `log_bin_trust_function_creators=1`), that `ACCOUNT LOCK` and
-`REVOKE TRIGGER` work, and that the dump client connects (TLS).
+### 5.4 INF-02 spike results on AWS (6 Nov 2026, eu-north-1)
+Environment: EC2 `t4g.large` (ARM, Amazon Linux 2023, Docker 25), RDS for MySQL 8.4.11 `db.t4g.medium`
+(single AZ, private, `log_bin_trust_function_creators=1`). Built by hand in the console (see decisions below).
+The app ran as the `openemr/openemr:flex` image with this repo mounted, one container on the server,
+provisioning run inside it as `apache` with `PROVISION_DB_ROOT_USER=dbadmin`.
+
+| Check | Result |
+|---|---|
+| App image on ARM | Runs. Composer, npm build and installer all complete |
+| First start of the dev-style image | About 20 minutes (npm install alone 9 min). Production image must bake this in (INF-04) |
+| Create practice (full install) | Works, 5 min 47 s |
+| Build golden database | Works, 341 s |
+| Clone from golden | Works, **20 s** (about 17 times faster than a full install) |
+| Schema A vs B | 286 tables each, 0 column differences |
+| Practice DB user limited to its own DB | Works (reading another practice is denied) |
+| Triggers (platform-admin guard) created by the RDS master user | Works (parameter group setting is what allows it) |
+| Guard blocks delete and deactivate | Works; normal app writes unaffected |
+| Practice user dropping the trigger | Possible while it holds TRIGGER; denied after `REVOKE TRIGGER` by `dbadmin` |
+| Pause: `ACCOUNT LOCK` / unlock | Works (error 3118, then back to normal) |
+| Upgrade tool with backup (8.4.0 to 8.5.0) | Works, 27 s, after the fixes below; no conflict with the guard triggers |
+| Dump with `mariadb-dump` against RDS, then restore | Works; 286 tables and both triggers present |
+
+**Decisions from the spike**
+- **Database engine: RDS MySQL 8.4 confirmed.** MariaDB is not needed.
+- **Server type: ARM `t4g.large` confirmed.** The x86 comparison was dropped because ARM works.
+- **Infrastructure was created by hand in the console**, not with Terraform. The Terraform in
+  `platform/terraform/` validates but was never applied; see its README. Repeatable Terraform is deferred
+  to a later ticket (before staging, INF-09). A runbook of the console steps is still to be written.
+- **Spend control is email alerts only** until the stop function is added (console or Terraform).
+
+**Parameter and code changes needed (carry into INF-04, TEN-04, TEN-05)**
+1. RDS parameter group: `log_bin_trust_function_creators=1`, `character_set_server=utf8mb4`.
+2. RDS master user is `dbadmin`, not `root`: set `PROVISION_DB_ROOT_USER`.
+3. Practice DB users get all privileges **except TRIGGER** (provisioning change, TEN-04).
+4. The image makes `sites/` read-only. The worker needs `sites/` writable by `apache` (chown, mode 700),
+   because it creates a folder per practice. Nothing else under it should become writable.
+5. The image deletes `sql_upgrade.php`, `acl_upgrade.php` (and others) after setup. The upgrade wrapper
+   must copy in `sql_upgrade.php` and `acl_upgrade.php` just before an upgrade and remove them right after
+   (do not leave them in the web root).
+6. `upgrade-practices.php` hides the upgrade's error output (only the exit code shows). Show it in the log (TEN-05).
+7. Secrets: spike passwords were exported in the shell and stored in container settings. Not acceptable
+   for production (INF-04).
+
+**Not tested:** TLS to the database (`require_secure_transport` is OFF and the client did not verify the
+certificate; decide in SEC-01), x86, multi-AZ, and RDS storage or CPU under load.
 
 ---
 
@@ -300,9 +341,11 @@ Format: **ID Title** · Size · Priority · Milestone · depends on. Then descri
 - **INF-02 Create Terraform base and run server spike** · L · P1 · M1 · depends: INF-01
   Minimal Terraform for network, security groups, remote state and tagging. First run our provisioning checks against a local MySQL 8.4 container, then test the app image on ARM and x86 and run provisioning against RDS for MySQL 8.4 (create, clone, pause lock, triggers, upgrade, dump). Use MariaDB only if MySQL fails.
   Done when: `apply` and `destroy` work from a clean checkout; server type chosen and MySQL 8.4 confirmed (or the reason for MariaDB written down), with results and parameter changes recorded here.
+  **Revised scope (6 Nov 2026):** infrastructure built by hand in the console, so the Terraform apply/destroy criterion and the x86 test are dropped. The spike is complete and recorded in section 5.4. Open from this ticket: a console runbook, the budget stop function, and finishing Terraform later.
 - **INF-03 Create app server and database** · M · P1 · M1 · depends: INF-02
   EC2 with Elastic IP, encrypted disk sized for documents, SSM access and no inbound SSH; encrypted RDS in a private subnet with 7-day backups and deletion protection.
   Done when: server reachable only through SSM with ports 80 and 443 open; database reachable only from the server.
+  **Status (6 Nov 2026): done, created in the console** (EC2 `t4g.large`, RDS MySQL 8.4.11 `db.t4g.medium`). Deletion protection is still OFF on purpose and must be turned on before any real data.
 - **INF-04 Deploy the app, dashboard and worker** · L · P1 · M1 · depends: INF-03
   Production image with OpenEMR and our code, a compose file (web, worker, Caddy), secrets in SSM Parameter Store or Secrets Manager, dashboard setup and worker as a managed service.
   Done when: a practice is created from the live dashboard; no secret in the repo or image.

@@ -1,0 +1,56 @@
+# EMB EHR on one server: web (OpenEMR + dashboard), worker, and Caddy in front.
+# Secrets are not in this file or in the image. The worker reads the database password from Secrets Manager
+# with the server's IAM role. Non-secret settings come from .env (written by deploy.sh).
+services:
+  web:
+    image: emb-ehr:${EMB_TAG:-local}
+    build:
+      context: ../..
+      dockerfile: platform/deploy/Dockerfile
+    command: ["web"]
+    restart: always
+    volumes:
+      - sites:/var/www/localhost/htdocs/openemr/sites
+      - dashvar:/var/www/localhost/htdocs/openemr/platform/dashboard/var
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --header='Host: admin.localhost' http://127.0.0.1/login || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    image: emb-ehr:${EMB_TAG:-local}
+    command: ["worker"]
+    restart: always
+    environment:
+      PROVISION_DB_HOST: ${DB_HOST:?set by deploy.sh}
+      DB_SECRET_ARN: ${DB_SECRET_ARN:?set by deploy.sh}
+      AWS_REGION: ${AWS_REGION:-eu-north-1}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-eu-north-1}
+      DASHBOARD_VERIFY_URL: http://web
+    volumes:
+      - sites:/var/www/localhost/htdocs/openemr/sites
+      - dashvar:/var/www/localhost/htdocs/openemr/platform/dashboard/var
+    depends_on:
+      - web
+
+  caddy:
+    image: caddy:2
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+volumes:
+  sites:
+  dashvar:
+  caddy_data:
+  caddy_config:

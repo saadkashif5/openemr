@@ -1,0 +1,10 @@
+# HTTP only for now. INF-05 turns on HTTPS with a wildcard certificate for the platform domain.
+# Caddy keeps the original Host header, which is how OpenEMR picks the practice and how the repo's
+# .htaccess serves the dashboard on admin.<domain>.
+{
+	auto_https off
+}
+
+:80 {
+	reverse_proxy web:80
+}

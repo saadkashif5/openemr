@@ -56,7 +56,7 @@ if (is_file($configFile)) {
     $old = umask(0177);
     $written = file_put_contents(
         $configFile,
-        "<?php\n\nreturn " . var_export(['db' => $db, 'verify_url' => 'http://localhost'], true) . ";\n"
+        "<?php\n\nreturn " . var_export(['db' => $db, 'verify_url' => getenv('DASHBOARD_VERIFY_URL') ?: 'http://localhost'], true) . ";\n"
     );
     umask($old);
     if ($written === false) {

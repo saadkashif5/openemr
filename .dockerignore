@@ -1,0 +1,17 @@
+# Used by platform/deploy/Dockerfile (build context is the repo root).
+.git
+.github
+.idea
+.vscode
+node_modules
+ccdaservice/node_modules
+vendor
+tests
+docker
+tmp
+platform/terraform
+platform/dashboard/var
+sites/*
+!sites/default
+sites/default/documents
+**/*.log
