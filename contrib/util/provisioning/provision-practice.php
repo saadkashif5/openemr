@@ -605,6 +605,12 @@ final class Provisioner
         foreach ($spec->modules as $module) {
             foreach (['install', 'enable'] as $action) {
                 $output = $this->console($spec, ["--modaction=$action", "--modname=$module"]);
+                // Some modules (Weno, fax, ...) refuse to enable until the practice has its own credentials.
+                // That is not a provisioning failure: leave the module installed but disabled and carry on.
+                if ($action === 'enable' && preg_match('/not configured|please configure/i', $output) === 1) {
+                    $this->logger->warning('Module {module} is installed but not enabled: it needs configuration in the practice', ['module' => $module]);
+                    continue 2;
+                }
                 // The command exits 0 even when the action reports a failure, so read its status line.
                 if (!preg_match('/^Success$/mi', $output) && !str_contains($output, 'Handled by the module itself')) {
                     throw new RuntimeException("Module $module: $action did not report success: " . substr(trim($output), -400));
