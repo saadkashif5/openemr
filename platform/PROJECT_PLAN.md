@@ -293,6 +293,46 @@ provisioning run inside it as `apache` with `PROVISION_DB_ROOT_USER=dbadmin`.
 **Not tested:** TLS to the database (`require_secure_transport` is OFF and the client did not verify the
 certificate; decide in SEC-01), x86, multi-AZ, and RDS storage or CPU under load.
 
+### 5.5 INF-04 results (6 Nov 2026)
+Files: `platform/deploy/` (Dockerfile, `emb-entrypoint.sh`, `docker-compose.yml`, `Caddyfile`, `deploy.sh`, README).
+Three containers from one image: `web` (Apache, OpenEMR + dashboard), `worker`, `caddy` (HTTP only until INF-05).
+
+| Check | Result |
+|---|---|
+| Image build on the ARM server | Works, about 25 minutes, 4.06 GB; container starts in seconds (stock image: 20 minutes at every start) |
+| Dashboard setup, operator login, password change | Works |
+| Practice created from the live dashboard (full install), first login prompts a password change | Works (`practice-b`, `practice-c` on `*.16-16-148-94.sslip.io`) |
+| Practice with modules: Weno plus a normal module | Works. Weno stays installed but disabled (needs its own credentials); the normal module enables |
+| Secret in the image layers or container settings | None: database password searched for in all layers and in web, worker and caddy settings, 0 matches |
+| Secret in the repo | None found (keys, real endpoint, secret ARN, account id, hardcoded passwords) |
+| Web container starts from the image alone (override file removed) | Works |
+
+**Design as built**
+- The database root password never touches disk or git. The worker fetches it at start from Secrets Manager with the
+  server's IAM role (policy `emb-ehr-secrets`: read `rds!db-*`, read/write Parameter Store `/emb-ehr/*`).
+  Only the worker has it; web does not. The running worker process does hold it in memory (unavoidable).
+- The stock startup script is skipped. Our entrypoint creates a throwaway self-signed pair at start (Apache's bundled
+  HTTPS block will not load without one; Caddy terminates TLS), keeps setup scripts in `/opt/openemr-setup`
+  (outside the web root), and makes `sites/` and the dashboard data volume writable by `apache`.
+- PHP runs in Apache through `mod_php` (it overrides the FastCGI handler in `openemr.conf`); no PHP-FPM needed.
+- Hostname for now: `admin.16-16-148-94.sslip.io` with port 80 limited to the owner's IP. Replace with the platform domain in INF-05.
+
+**Problems found and fixed**
+1. `docker compose build` needs buildx (absent on Amazon Linux 2023): `deploy.sh build` uses `docker build`.
+2. Apache would not start without a certificate pair: entrypoint creates one at start.
+3. Bind-mounted scripts lacked the executable bit (Windows does not track it): set with `git update-index --chmod=+x`.
+4. A single-word domain was accepted (`practice-b`) and is unreachable: domain now needs a dot (`PracticeSpec`).
+5. A module that needs configuration (Weno) failed the whole create: now installed but left disabled, with a warning.
+6. The module failure message hid the command output: it now includes the last 400 characters.
+
+**Known gaps (carry forward)**
+- Any code change invalidates the layer holding the installed packages, so every rebuild takes about 25 minutes. Split the
+  Dockerfile into a dependency layer (composer/npm manifests) and a code layer, or build in CI with a cache (INF-08).
+- The code tree is owned by the web user and writable. Harden in SEC-01.
+- The upgrade wrapper must copy `sql_upgrade.php` and `acl_upgrade.php` from `/opt/openemr-setup/` for one run (TEN-05).
+- No HTTPS (INF-05), no deletion protection on RDS yet, budget stop function not deployed.
+- The server clone needs a push and pull for each change; there is no pipeline yet.
+
 ---
 
 ## 6. Milestones and order
@@ -349,6 +389,7 @@ Format: **ID Title** · Size · Priority · Milestone · depends on. Then descri
 - **INF-04 Deploy the app, dashboard and worker** · L · P1 · M1 · depends: INF-03
   Production image with OpenEMR and our code, a compose file (web, worker, Caddy), secrets in SSM Parameter Store or Secrets Manager, dashboard setup and worker as a managed service.
   Done when: a practice is created from the live dashboard; no secret in the repo or image.
+  **Status (6 Nov 2026): done.** See section 5.5. Open follow-ups: image layering for faster rebuilds, hardening file permissions (SEC-01), HTTPS (INF-05).
 - **INF-05 Set up HTTPS for admin and practice hostnames** · M · P1 · M1 · depends: INF-04
   Wildcard certificate by DNS challenge for `*.<platform-domain>` and `admin.`, with automatic renewal.
   Done when: `https://admin.<platform-domain>` and a practice subdomain load with valid certificates.
