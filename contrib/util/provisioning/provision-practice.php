@@ -272,6 +272,7 @@ final class Provisioner
         }
     }
 
+    private const PLATFORM_MODULE = 'oe-module-platform';
     private const GOLDEN_DB = 'oe_golden';
     private const GOLDEN_USER = 'u_golden';
     private const GOLDEN_SITE = 'golden-build';
@@ -598,11 +599,10 @@ final class Provisioner
      */
     private function enableModules(PracticeSpec $spec): void
     {
-        if ($spec->modules === []) {
-            return;
-        }
+        // Every practice gets our platform module (shell launcher and endpoints), whatever the spec lists.
+        $modules = array_values(array_unique([self::PLATFORM_MODULE, ...$spec->modules]));
         $this->console($spec, ['--modaction=discover']);
-        foreach ($spec->modules as $module) {
+        foreach ($modules as $module) {
             foreach (['install', 'enable'] as $action) {
                 $output = $this->console($spec, ["--modaction=$action", "--modname=$module"]);
                 // Some modules (Weno, fax, ...) refuse to enable until the practice has its own credentials.

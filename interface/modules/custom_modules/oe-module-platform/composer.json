@@ -1,0 +1,20 @@
+{
+    "name": "emb/oe-module-platform",
+    "description": "EMB platform module: endpoints and the shell launcher for the multi-practice EHR",
+    "type": "openemr-module",
+    "license": "GPL-3.0-or-later",
+    "require": {
+        "php": ">=8.3"
+    },
+    "autoload": {
+        "psr-4": {
+            "OpenEMR\\Modules\\Platform\\": "src/"
+        }
+    },
+    "extra": {
+        "openemr": {
+            "type": "custom-module",
+            "directory": "oe-module-platform"
+        }
+    }
+}
