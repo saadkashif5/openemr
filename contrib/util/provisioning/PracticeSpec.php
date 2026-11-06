@@ -41,6 +41,10 @@ final readonly class PracticeSpec
         if (!preg_match('/^(?=.{1,100}$)[a-z0-9]+(?:[.-][a-z0-9]+)*$/', $domain) || $domain === 'default') {
             throw new InvalidArgumentException("domain must be lowercase letters, digits, dots and hyphens (and not 'default')");
         }
+        // The domain is the practice's real host name; a single word can never be reached from a browser.
+        if (!str_contains($domain, '.')) {
+            throw new InvalidArgumentException('domain must be a full host name with at least one dot, for example clinic.example.com');
+        }
         // Any host starting "admin." is routed to the super-admin dashboard (see the top-level .htaccess).
         if ($domain === 'admin' || str_starts_with($domain, 'admin.')) {
             throw new InvalidArgumentException("domains starting with 'admin.' are reserved for the platform dashboard");

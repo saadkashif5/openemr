@@ -607,7 +607,7 @@ final class Provisioner
                 $output = $this->console($spec, ["--modaction=$action", "--modname=$module"]);
                 // The command exits 0 even when the action reports a failure, so read its status line.
                 if (!preg_match('/^Success$/mi', $output) && !str_contains($output, 'Handled by the module itself')) {
-                    throw new RuntimeException("Module $module: $action did not report success");
+                    throw new RuntimeException("Module $module: $action did not report success: " . substr(trim($output), -400));
                 }
             }
         }
