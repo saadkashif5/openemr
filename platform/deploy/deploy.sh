@@ -32,7 +32,8 @@ case "$cmd" in
         echo "Wrote .env (endpoint and secret name only, no password)."
         ;;
     build)
-        $DC build web
+        # Plain docker build: "docker compose build" needs the buildx plugin, which this server does not have.
+        docker build -f Dockerfile -t "emb-ehr:${EMB_TAG:-local}" ../..
         ;;
     setup)
         $DC run --rm worker setup

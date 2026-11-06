@@ -24,6 +24,20 @@ prepare_dirs() {
     chmod 700 "$APP/sites" "$APP/platform/dashboard/var"
 }
 
+# The base image's Apache config has an HTTPS section that refuses to load without a certificate pair.
+# Caddy terminates HTTPS in front of us and port 443 is not published, so a throwaway self-signed pair made
+# when the container starts is enough. It is created here, not in the image, so no key is ever baked in.
+ensure_tls_placeholder() {
+    cert=/etc/ssl/certs/webserver.cert.pem
+    key=/etc/ssl/private/webserver.key.pem
+    if [ ! -s "$cert" ] || [ ! -s "$key" ]; then
+        mkdir -p /etc/ssl/certs /etc/ssl/private
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=localhost" \
+            -keyout "$key" -out "$cert" >/dev/null 2>&1
+        chmod 600 "$key"
+    fi
+}
+
 fetch_db_secret() {
     : "${DB_SECRET_ARN:?DB_SECRET_ARN is not set}"
     : "${AWS_REGION:?AWS_REGION is not set}"
@@ -40,6 +54,7 @@ fetch_db_secret() {
 case "$mode" in
     web)
         prepare_dirs
+        ensure_tls_placeholder
         exec /usr/sbin/httpd -D FOREGROUND
         ;;
     worker)
