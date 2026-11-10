@@ -1,0 +1,14 @@
+{% extends 'base.twig' %}
+{% block title %}Opening {{ job.domain }}{% endblock %}
+{% block content %}
+<div class="card narrow" id="handoff"
+     data-status-url="{{ base }}/jobs/{{ job.id }}/status"
+     data-handoff-url="{{ base }}/jobs/{{ job.id }}/handoff"
+     data-csrf="{{ csrf }}">
+    <h1>Opening {{ job.domain }}</h1>
+    <p id="handoff-message">Getting a one-time sign-in ready…</p>
+    <p class="note">You will be signed in as the platform administrator of this practice. The password is used once and is changed again straight afterwards.</p>
+    <noscript><p class="flash error">This page needs JavaScript to sign you in.</p></noscript>
+</div>
+<script src="{{ assets }}/handoff.js"></script>
+{% endblock %}

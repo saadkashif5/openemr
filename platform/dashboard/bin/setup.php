@@ -73,6 +73,15 @@ $pdo = new PDO(
     [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
 );
 $pdo->exec((string) file_get_contents("$appDir/schema.sql"));
+
+// Upgrades for installs that already have the tables (CREATE TABLE IF NOT EXISTS leaves them as they were).
+// Safe to repeat. MODIFY just restates the list of job types; the column is added only when it is missing.
+$pdo->exec("ALTER TABLE jobs MODIFY type ENUM('create', 'reset_admin', 'destroy', 'build_golden', 'open_practice', 'close_practice') NOT NULL");
+$hasRunAfter = $pdo->prepare("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'jobs' AND column_name = 'run_after'");
+$hasRunAfter->execute();
+if ((int) $hasRunAfter->fetchColumn() === 0) {
+    $pdo->exec('ALTER TABLE jobs ADD COLUMN run_after DATETIME NULL AFTER created_at');
+}
 $tables = $pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
 echo 'Schema ready: ' . implode(', ', $tables) . "\n";
 echo "Next: php platform/dashboard/bin/create-operator.php EMAIL \"Full Name\" owner\n";

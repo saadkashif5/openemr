@@ -69,11 +69,45 @@ For production:
 |---|---|---|---|
 | Practices list, practice details, job pages | yes | yes | yes |
 | Create practice, reset admin password, reveal an initial password, audit log | | yes | yes |
+| Open a practice (one click, signed in as its platform administrator) | | yes | yes |
 | Delete a practice (type its domain to confirm), build the golden database | | | yes |
 
 Failed sign-ins are counted: five in a row lock the account for 15 minutes. Sessions end after 30
 minutes idle (12 hours at most). Every form carries a CSRF token. Every action, including each
 password reveal, is written to the audit log, which never holds a password.
+
+## Opening a practice (one click)
+
+Pick an active practice in the dropdown on the Practices page (or press **Open practice** on its own page). The practice
+opens in a new tab, signed in as its hidden `platform-admin` account (see `contrib/util/provisioning/README.md`).
+
+```
+click Open -> new tab: /jobs/<n>/open -> worker rotates the platform account's password (one-time file)
+           -> the page collects it once (POST /jobs/<n>/handoff) and posts the practice's own login form in the same tab
+           -> about 45 s later a second rotation makes the used password stop working
+```
+
+- **Nothing stores the password.** The worker writes it to a one-time file; the handoff claims it atomically (a second claim
+  gets 410), deletes the file as it reads it, and the browser keeps it only for the moment it posts the form. The generic
+  "Reveal password" is closed for these jobs, and a close job's file is deleted unread.
+- **Safety net.** If nobody collects an opened password, a rotation still runs 120 seconds after the open finished. A newer
+  open pushes a waiting rotation later, so an earlier open's rotation can never land in the middle of a later sign-in.
+- **Audited:** `practice.open.requested`, `practice.open` (who, which practice, as which account) and the worker's `job.*`
+  entries; the practice's own log also records the platform account signing in. A viewer cannot open (403).
+- **Only the owner or an operator, and only for the requester's own job** (other operators get 404).
+- **Security policy.** Every page forbids posting a form to another site (`form-action 'self'`). The waiting page alone may
+  post to the one practice it is opening, and its script comes from `public/handoff.js` (no inline script).
+- **Same site only.** A practice's session cookie is `SameSite=Strict`, so this works for a practice on the same site as the
+  dashboard, that is `<slug>.<platform-domain>` (decision D-03). A practice on its **own domain** is refused (HTTP 422) until the
+  signed-token sign-in exists (TEN-06). Tested in real Chromium: same site signs in, a different site is sent back to the login page.
+
+**Configuration** (keys in `var/config.php`; defaults in brackets): `platform_domain` (none: open is refused until set, for
+example `emb.example.com`), `practice_scheme` (`https`; `http` in a local stack) and `practice_port` (none).
+
+**Upgrading an existing install:** run `php platform/dashboard/bin/setup.php` again. It adds the new job types and the
+`run_after` column to `jobs`, and is safe to repeat. Restart the worker so it knows the new job types.
+
+**Testing it:** `dev/open-practice-e2e.php` drives the dev stack's Chromium through the whole flow (see its header).
 
 ## Things to know
 

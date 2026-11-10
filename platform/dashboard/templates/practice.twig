@@ -25,9 +25,17 @@
     </tbody>
 </table>
 
-{% if p.status == 'active' and (perms.reset_admin or perms.destroy) %}
+{% if p.status == 'active' and (perms.reset_admin or perms.destroy or perms.open) %}
 <h2>Actions</h2>
 <div class="card">
+    {% if perms.open %}
+    <form method="post" action="{{ base }}/open" target="_blank">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <input type="hidden" name="domain" value="{{ p.domain }}">
+        <button type="submit">Open practice</button>
+        <p class="note">Opens this practice in a new tab, signed in as its platform administrator, and records it in the audit log.</p>
+    </form>
+    {% endif %}
     {% if perms.reset_admin %}
     <form method="post" action="{{ base }}/practices/{{ p.domain }}/reset-admin">
         <input type="hidden" name="_csrf" value="{{ csrf }}">

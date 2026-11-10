@@ -17,8 +17,8 @@ final class Auth
 
     /** What each role may do. Viewers can look, operators can run routine work, owners can do everything. */
     private const PERMISSIONS = [
-        'owner' => ['view', 'create', 'reset_admin', 'reveal', 'audit', 'destroy', 'build_golden'],
-        'operator' => ['view', 'create', 'reset_admin', 'reveal', 'audit'],
+        'owner' => ['view', 'create', 'reset_admin', 'reveal', 'audit', 'destroy', 'build_golden', 'open'],
+        'operator' => ['view', 'create', 'reset_admin', 'reveal', 'audit', 'open'],
         'viewer' => ['view'],
     ];
 

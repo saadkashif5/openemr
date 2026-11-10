@@ -67,3 +67,8 @@ form.danger { border-top: 1px solid var(--line); margin-top: 1.25rem; padding-to
 .secret { font: 1.15rem ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .03em; }
 
 pre { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .75rem 1rem; overflow-x: auto; font-size: .85rem; }
+
+.open-form { display: flex; flex-wrap: wrap; align-items: end; gap: .75rem 1rem; margin: 0 0 1.25rem; }
+.open-form label { display: flex; flex-direction: column; gap: .25rem; flex: 1 1 18rem; color: var(--muted); font-size: .9rem; }
+.open-form select { padding: .45rem .5rem; border: 1px solid var(--line); border-radius: 6px; font: inherit; background: #fff; }
+.open-form .note { flex: 1 1 100%; margin: 0; }

@@ -13,7 +13,12 @@ use RuntimeException;
  */
 final class Jobs
 {
-    public const TYPES = ['create', 'reset_admin', 'destroy', 'build_golden'];
+    public const TYPES = ['create', 'reset_admin', 'destroy', 'build_golden', 'open_practice', 'close_practice'];
+
+    /** How long after an open the platform account's password is rotated again, so the one that was used stops working. */
+    public const CLOSE_AFTER_HANDOFF_SECONDS = 45;
+    /** Safety net if nobody collects an opened practice's password: rotate it anyway after this long. */
+    public const CLOSE_IF_UNCLAIMED_SECONDS = 120;
 
     public function __construct(private readonly PDO $pdo)
     {
@@ -68,10 +73,54 @@ final class Jobs
         return $this->pdo->query('SELECT * FROM jobs ORDER BY id DESC LIMIT ' . (int) $limit)->fetchAll();
     }
 
-    /** Worker side: take the oldest queued job, or null. */
+    /**
+     * Make sure a rotation of the platform account's password runs for this practice no earlier than $seconds from now.
+     * One close job per practice: a newer open pushes a waiting one later, so an earlier open's close can never rotate
+     * the password in the middle of a later open's sign-in.
+     */
+    public function scheduleClose(string $domain, int $seconds, int $operatorId, bool $mayPullEarlier = false): void
+    {
+        // Later by default. Only a sign-in that has just finished may bring a waiting close forward (see hasOtherPendingOpen).
+        $when = $mayPullEarlier
+            ? 'DATE_ADD(NOW(), INTERVAL ? SECOND)'
+            : 'GREATEST(COALESCE(run_after, NOW()), DATE_ADD(NOW(), INTERVAL ? SECOND))';
+        $push = $this->pdo->prepare("UPDATE jobs SET run_after = $when WHERE status = 'queued' AND type = 'close_practice' AND domain = ?");
+        $push->execute([$seconds, $domain]);
+        if ($push->rowCount() > 0) {
+            return;
+        }
+        $this->pdo->prepare(
+            "INSERT INTO jobs (type, domain, payload, requested_by, run_after) VALUES ('close_practice', ?, '{}', ?, DATE_ADD(NOW(), INTERVAL ? SECOND))"
+        )->execute([$domain, $operatorId, $seconds]);
+    }
+
+    /** Whole seconds since a job finished, by the database clock (the same clock that stamps it). Null if it has not finished. */
+    public function secondsSinceFinished(int $id): ?int
+    {
+        $stmt = $this->pdo->prepare('SELECT TIMESTAMPDIFF(SECOND, finished_at, NOW()) FROM jobs WHERE id = ? AND finished_at IS NOT NULL');
+        $stmt->execute([$id]);
+        $value = $stmt->fetchColumn();
+        return $value === false || $value === null ? null : (int) $value;
+    }
+
+    /** Is another open for this practice still waiting to be collected (queued, running, or finished and unclaimed)? */
+    public function hasOtherPendingOpen(string $domain, int $exceptJobId): bool
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT COUNT(*) FROM jobs WHERE type = 'open_practice' AND domain = ? AND id <> ? AND ("
+            . " status IN ('queued', 'running')"
+            . " OR (status = 'succeeded' AND secret_revealed_at IS NULL AND finished_at > DATE_SUB(NOW(), INTERVAL " . self::CLOSE_IF_UNCLAIMED_SECONDS . " SECOND)))"
+        );
+        $stmt->execute([$domain, $exceptJobId]);
+        return (int) $stmt->fetchColumn() > 0;
+    }
+
+    /** Worker side: take the oldest queued job that is due, or null. */
     public function claimNext(): ?array
     {
-        $id = $this->pdo->query("SELECT id FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1")->fetchColumn();
+        $id = $this->pdo->query(
+            "SELECT id FROM jobs WHERE status = 'queued' AND (run_after IS NULL OR run_after <= NOW()) ORDER BY id LIMIT 1"
+        )->fetchColumn();
         if ($id === false) {
             return null;
         }

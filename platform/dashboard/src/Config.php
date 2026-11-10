@@ -19,6 +19,9 @@ final readonly class Config
         public string $tmpDir,
         public string $verifyUrl,
         public bool $secureCookies = false,
+        public ?string $platformDomain = null,
+        public string $practiceScheme = 'https',
+        public ?int $practicePort = null,
     ) {
     }
 
@@ -49,6 +52,26 @@ final readonly class Config
             $appDir . '/var/tmp',
             is_string($data['verify_url'] ?? null) ? $data['verify_url'] : 'http://localhost',
             ($data['secure_cookies'] ?? false) === true,
+            is_string($data['platform_domain'] ?? null) && $data['platform_domain'] !== '' ? strtolower($data['platform_domain']) : null,
+            ($data['practice_scheme'] ?? 'https') === 'http' ? 'http' : 'https',
+            is_int($data['practice_port'] ?? null) && $data['practice_port'] > 0 ? $data['practice_port'] : null,
         );
+    }
+
+    /**
+     * One-click open only works for a practice on the same site as this dashboard, because a practice's session
+     * cookie is SameSite=Strict: <slug>.<platform-domain> qualifies, a customer's own domain does not (yet).
+     */
+    public function isOnPlatformDomain(string $practiceDomain): bool
+    {
+        return $this->platformDomain !== null
+            && str_ends_with($practiceDomain, '.' . $this->platformDomain)
+            && !str_starts_with($practiceDomain, 'admin.');
+    }
+
+    /** The practice's origin, for example https://clinic.example.com (a port only when configured, for local stacks). */
+    public function practiceOrigin(string $practiceDomain): string
+    {
+        return $this->practiceScheme . '://' . $practiceDomain . ($this->practicePort !== null ? ':' . $this->practicePort : '');
     }
 }

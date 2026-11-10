@@ -7,6 +7,7 @@ namespace Platform\Dashboard;
 use InvalidArgumentException;
 use PracticeSpec;
 use RuntimeException;
+use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -98,6 +99,19 @@ final class App
         }
         if (preg_match('#^/jobs/(\d+)/reveal$#', $path, $m) && $method === 'POST') {
             return $this->reveal($request, $operator, (int) $m[1]);
+        }
+        // One-click open of a practice (ADM-01).
+        if ($method === 'POST' && $path === '/open') {
+            return $this->openPractice($request, $operator);
+        }
+        if (preg_match('#^/jobs/(\d+)/open$#', $path, $m) && $method === 'GET') {
+            return $this->openWaiting($operator, (int) $m[1]);
+        }
+        if (preg_match('#^/jobs/(\d+)/status$#', $path, $m) && $method === 'GET') {
+            return $this->openStatus($operator, (int) $m[1]);
+        }
+        if (preg_match('#^/jobs/(\d+)/handoff$#', $path, $m) && $method === 'POST') {
+            return $this->openHandoff($request, $operator, (int) $m[1]);
         }
         if ($method === 'POST' && $path === '/golden/build') {
             $this->require($operator, 'build_golden');
@@ -323,8 +337,122 @@ final class App
             'steps' => $state['steps'] ?? [],
             'result' => json_decode((string) $job['result'], true),
             'canReveal' => $job['status'] === 'succeeded' && $job['secret_file'] !== null && $job['secret_revealed_at'] === null
-                && is_file((string) $job['secret_file']) && Auth::can($operator, 'reveal'),
+                && $job['type'] !== 'open_practice' && is_file((string) $job['secret_file']) && Auth::can($operator, 'reveal'),
         ], 200, $operator);
+    }
+
+    /**
+     * One click on "Open" (the form posts into a new tab). Queue the job that gives the practice's platform account a fresh
+     * password, and send this tab to the page that waits for it and then signs in. Only for practices on the platform domain.
+     *
+     * @param array<string, mixed> $operator
+     */
+    private function openPractice(Request $request, array $operator): Response
+    {
+        $this->require($operator, 'open');
+        $domain = trim($request->request->getString('domain'));
+        $state = Practices::validDomain($domain) ? $this->practices->find($domain) : null;
+        if ($state === null || ($state['status'] ?? '') !== 'active') {
+            throw new HttpError(404, 'Practice not found or not active');
+        }
+        // Three different reasons it can be unavailable, each with its own message (they have different fixes).
+        $platformDomain = $this->config->platformDomain;
+        if ($platformDomain === null) {
+            throw new HttpError(422, 'One-click open is not set up: add "platform_domain" (the domain your admin and practice addresses share, for example emb.example.com) to platform/dashboard/var/config.php.');
+        }
+        $host = $request->getHost();
+        if ($host !== 'admin.' . $platformDomain && !str_ends_with($host, '.' . $platformDomain)) {
+            throw new HttpError(422, 'Open the dashboard at admin.' . $platformDomain . ' to use one-click open. You are on ' . $host . ', which is a different site from the practices, so the practice would not accept the sign-in.');
+        }
+        if (!$this->config->isOnPlatformDomain($domain)) {
+            throw new HttpError(422, $domain . ' is not under ' . $platformDomain . ' (for example a practice on its own domain). One-click open works for practices at <name>.' . $platformDomain . '; its own domain needs the signed-token sign-in, which is not built yet.');
+        }
+        try {
+            $jobId = $this->jobs->enqueue('open_practice', $domain, [], (int) $operator['id']);
+        } catch (RuntimeException $e) {
+            throw new HttpError(409, $e->getMessage());
+        }
+        $this->audit->log($operator, 'practice.open.requested', $domain, ['job' => $jobId], $request->getClientIp());
+        return $this->redirect('/jobs/' . $jobId . '/open');
+    }
+
+    /**
+     * An open job this operator asked for, or a 404. Anyone else's, or any other kind of job, is "not found".
+     *
+     * @param array<string, mixed> $operator
+     * @return array<string, mixed>
+     */
+    private function ownOpenJob(array $operator, int $id): array
+    {
+        $job = $this->jobs->find($id);
+        if ($job === null || $job['type'] !== 'open_practice' || (int) $job['requested_by'] !== (int) $operator['id']) {
+            throw new HttpError(404, 'Not found');
+        }
+        $this->require($operator, 'open');
+        return $job;
+    }
+
+    /** @param array<string, mixed> $operator */
+    private function openWaiting(array $operator, int $id): Response
+    {
+        $job = $this->ownOpenJob($operator, $id);
+        $origin = $this->config->practiceOrigin((string) $job['domain']);
+        $response = $this->page('open.twig', ['job' => $job, 'origin' => $origin], 200, $operator);
+        // This one page may send a form to this practice's origin (and nowhere else); the script comes from our own file.
+        $response->headers->set(
+            'Content-Security-Policy',
+            "default-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self' $origin; frame-ancestors 'none'; base-uri 'none'"
+        );
+        return $response;
+    }
+
+    /** @param array<string, mixed> $operator */
+    private function openStatus(array $operator, int $id): Response
+    {
+        $job = $this->ownOpenJob($operator, $id);
+        // Status only. The reason a job failed stays on the job page for operators; nothing secret is ever in here.
+        return new JsonResponse(['status' => $job['status']], 200, ['Cache-Control' => 'no-store']);
+    }
+
+    /**
+     * Give the browser the one-time sign-in for the practice. Claimed atomically (a second call gets nothing), the secret
+     * file is deleted as it is read, the open is audited, and the password is rotated again shortly after.
+     *
+     * @param array<string, mixed> $operator
+     */
+    private function openHandoff(Request $request, array $operator, int $id): Response
+    {
+        $job = $this->ownOpenJob($operator, $id);
+        $domain = (string) $job['domain'];
+        $file = $job['secret_file'] ?? null;
+        $inside = is_string($file) && realpath($file) !== false
+            && str_starts_with(realpath($file), (realpath($this->config->secretsDir) ?: '') . DIRECTORY_SEPARATOR);
+        $age = $this->jobs->secondsSinceFinished($id);
+        if ($job['status'] !== 'succeeded' || !$inside || $job['secret_revealed_at'] !== null || $age === null || $age > Jobs::CLOSE_IF_UNCLAIMED_SECONDS) {
+            return new JsonResponse(['status' => 'unavailable'], 410, ['Cache-Control' => 'no-store']);
+        }
+        // Claim it first: if two requests arrive together, only one wins.
+        if (!$this->jobs->markRevealed($id, (int) $operator['id'])) {
+            return new JsonResponse(['status' => 'unavailable'], 410, ['Cache-Control' => 'no-store']);
+        }
+        $secret = json_decode((string) file_get_contents($file), true);
+        @unlink($file);
+        if (!is_array($secret) || !isset($secret['username'], $secret['initial_password'])) {
+            return new JsonResponse(['status' => 'unavailable'], 410, ['Cache-Control' => 'no-store']);
+        }
+        // The used password stops working shortly: bring a waiting rotation forward unless another open is still pending.
+        $this->jobs->scheduleClose($domain, Jobs::CLOSE_AFTER_HANDOFF_SECONDS, (int) $operator['id'], !$this->jobs->hasOtherPendingOpen($domain, $id));
+        $this->audit->log($operator, 'practice.open', $domain, ['job' => $id, 'as' => $secret['username']], $request->getClientIp());
+        return new JsonResponse([
+            'status' => 'ok',
+            'action' => $this->config->practiceOrigin($domain) . '/interface/main/main_screen.php?auth=login&site=' . rawurlencode($domain),
+            'fields' => [
+                'authUser' => $secret['username'],
+                'clearPass' => $secret['initial_password'],
+                'languageChoice' => '1',
+                'new_login_session_management' => '1',
+            ],
+        ], 200, ['Cache-Control' => 'no-store']);
     }
 
     /** Show the initial admin password once, then delete it: it is not kept anywhere else. */
@@ -335,7 +463,8 @@ final class App
         $file = $job['secret_file'] ?? null;
         $inside = is_string($file) && realpath($file) !== false
             && str_starts_with(realpath($file), (realpath($this->config->secretsDir) ?: '') . DIRECTORY_SEPARATOR);
-        if ($job === null || !$inside || $job['secret_revealed_at'] !== null || $job['status'] !== 'succeeded') {
+        // The platform account's password is never shown on a page: only the open handoff may use it.
+        if ($job === null || !$inside || ($job['type'] ?? '') === 'open_practice' || $job['secret_revealed_at'] !== null || $job['status'] !== 'succeeded') {
             $this->flash('That password is no longer available. Use "Reset admin password" to issue a new one.', true);
             return $this->redirect('/jobs/' . $id);
         }
@@ -373,7 +502,7 @@ final class App
         $flash = $_SESSION['flash'] ?? null;
         unset($_SESSION['flash']);
         $perms = [];
-        foreach (['create', 'reset_admin', 'reveal', 'audit', 'destroy', 'build_golden'] as $p) {
+        foreach (['create', 'reset_admin', 'reveal', 'audit', 'destroy', 'build_golden', 'open'] as $p) {
             $perms[$p] = $operator !== null && Auth::can($operator, $p);
         }
         $html = $this->twig->render($template, $vars + [
@@ -401,8 +530,11 @@ final class App
     /** Headers for every response: no framing, no inline script, nothing cached. */
     private function secure(Response $response): Response
     {
+        // A page may set its own, narrower-purpose policy (the open handoff page does); every other page gets this one.
+        if (!$response->headers->has('Content-Security-Policy')) {
+            $response->headers->set('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'");
+        }
         $response->headers->add([
-            'Content-Security-Policy' => "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
             'X-Content-Type-Options' => 'nosniff',
             'Referrer-Policy' => 'no-referrer',
             'X-Frame-Options' => 'DENY',

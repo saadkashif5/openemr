@@ -19,12 +19,13 @@ CREATE TABLE IF NOT EXISTS operators (
 
 CREATE TABLE IF NOT EXISTS jobs (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    type ENUM('create', 'reset_admin', 'destroy', 'build_golden') NOT NULL,
+    type ENUM('create', 'reset_admin', 'destroy', 'build_golden', 'open_practice', 'close_practice') NOT NULL,
     domain VARCHAR(100) NULL,
     payload TEXT NULL,
     status ENUM('queued', 'running', 'succeeded', 'failed') NOT NULL DEFAULT 'queued',
     requested_by INT UNSIGNED NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    run_after DATETIME NULL,
     started_at DATETIME NULL,
     finished_at DATETIME NULL,
     exit_code INT NULL,

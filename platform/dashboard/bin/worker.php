@@ -102,6 +102,9 @@ function commandFor(array $job, string $script, Config $config, string $specFile
             $script, 'reset-admin', $domain, "--secrets-file=$secretFile",
             isset($payload['username']) ? '--username=' . $payload['username'] : null,
         ])),
+        // Both give the practice's platform account a new random password. An open hands it to the browser once; a close
+        // exists only to make the previous one stop working, so its password file is deleted unread.
+        'open_practice', 'close_practice' => [$script, 'rotate-platform-admin', $domain, "--secrets-file=$secretFile"],
         'destroy' => [$script, 'destroy', $domain, "--confirm=$domain"],
         'build_golden' => [$script, 'build-golden'],
     };
@@ -157,8 +160,15 @@ while (true) {
     $ok = $code === 0;
     // The script's error lines are written for operators and never contain secrets. Keep the tail.
     $error = $ok ? null : mb_substr(trim($stderr) !== '' ? trim($stderr) : "The script exited with code $code", -1500);
+    if ($job['type'] === 'close_practice' && is_file($secretFile)) {
+        @unlink($secretFile);
+    }
     $hasSecret = is_file($secretFile);
     $jobs->finish($id, $ok, $code, is_array($result) ? $result : null, $error, $hasSecret ? $secretFile : null);
+    if ($job['type'] === 'open_practice' && $ok) {
+        // Safety net: if nobody collects this password, rotate it anyway so a live one never sits in the practice.
+        $jobs->scheduleClose((string) $job['domain'], Jobs::CLOSE_IF_UNCLAIMED_SECONDS, (int) $job['requested_by']);
+    }
     $audit->log(null, 'job.' . ($ok ? 'succeeded' : 'failed'), (string) ($job['domain'] ?? ''), ['job' => $id, 'type' => $job['type'], 'exit' => $code]);
     logLine("Job $id " . ($ok ? 'succeeded' : "failed (exit $code)"));
 }
