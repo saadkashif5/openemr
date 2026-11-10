@@ -4,8 +4,8 @@ Single source of truth for building, hosting and running the platform. Written s
 AI assistant can read it cold and generate precise tickets from it (see section 0).
 
 - Status: living document. Ticket IDs are stable; ticket status lives in Jira, not here.
-- Last updated: 2026-11-05. Code state: all work committed on branch `dev`.
-- Size of the plan: **48 tickets in total, of which only the 24 in M0 and M1 are created now.** The rest
+- Last updated: 2026-11-10. Code state: all work committed on branch `dev`.
+- Size of the plan: **51 tickets in total, of which only the 26 in M0 and M1 are created now.** The rest
   are outlines that become tickets when their milestone starts.
 - **Deferred for now: billing, CPT data and the clearinghouse connection** (see section 8a).
 
@@ -25,7 +25,7 @@ AI assistant can read it cold and generate precise tickets from it (see section 
 5. **Create tickets for M0 and M1 only.** Later milestones are outlines: do not create them yet.
 
 ### 0.2 Paste-ready prompt for a ticket-generating assistant
-> Read `platform/PROJECT_PLAN.md`. Using the Jira MCP, create the epics in section 7, then the 24 tickets
+> Read `platform/PROJECT_PLAN.md`. Using the Jira MCP, create the epics in section 7, then the 26 tickets
 > for milestones M0 and M1, following the rules in section 0.1. Keep each ticket short. Link
 > dependencies. Print a table of the created keys when done. Do not create tickets for M2 or later.
 
@@ -108,6 +108,7 @@ mobile apps, e-prescribing, lab interfaces, migration of existing patient data.
 | D-13 | Classic OpenEMR pages are blocked for practice users once their replacement exists. The super admin keeps access to them as a safety net (to be confirmed, PLN-02) |
 | D-14 | Billing, CPT data and the clearinghouse are deferred and will be added later (see section 8a) |
 | D-15 | Specialty modules are built once and enabled per practice: Internal Medicine, Urgent Care, Behavioral Health, ASC. No client-specific code |
+| D-16 | **Proposed in ARC-01.** One service and permission layer (role plus practice) with two entry points: session endpoints for our own screens (D-09) and OpenEMR's OAuth, FHIR and SMART API for agents, MCP and third-party apps. Business logic lives in services, never in screens or routes |
 
 ---
 
@@ -349,12 +350,12 @@ Three containers from one image: `web` (Apache, OpenEMR + dashboard), `worker`, 
 
 Durations from M2 onward are rough and will be re-estimated after M1.
 
-### M1 plan (24 tickets for M0 and M1)
+### M1 plan (26 tickets for M0 and M1)
 M1 is ambitious for one person in 3 weeks. P1 = must for the demo; P2 = stretch.
-- **Week 1, hosting first:** PLN-01, PLN-02, INF-01, INF-02, INF-03, INF-04, INF-05, SEC-01.
+- **Week 1, hosting first:** PLN-01, PLN-02, INF-01, INF-02, INF-03, INF-04, INF-05, SEC-01, ARC-01.
 - **Week 2, admin features:** TEN-03, TEN-01, TEN-02, TEN-04, ADM-01, INF-06, SHL-01.
 - **Week 3, shell, theme, demo:** SHL-02, SHL-03, THM-01, ADM-03, OPS-01.
-- **Stretch, in this order:** ADM-02, SHL-04, INF-07, INF-08.
+- **Stretch, in this order:** ADM-02, FHI-01, SHL-04, INF-07, INF-08.
 - **Do not skip before any real patient data:** ADM-02 two-factor, INF-06 restore drill, SEC-01 gate.
 - **If time slips, cut:** SHL-04, INF-08, INF-07, then THM-01. Never cut INF-01..06, TEN-01..04, SHL-01..03.
 
@@ -372,6 +373,22 @@ Format: **ID Title** · Size · Priority · Milestone · depends on. Then descri
 - **PLN-02 Confirm pilot scope with EMB** · S · P1 · M0 · depends: none
   Write one page of what the 3-week pilot includes and excludes, agree staged delivery of the new interface, and confirm super-admin access to classic pages (D-13).
   Done when: EMB acknowledges the page in writing; D-13 confirmed or changed.
+
+### ARC: Architecture for AI and interoperability
+
+Source: the client asked that the EHR be AI-native from day one (FHIR and SMART on FHIR, MCP and Agent
+Skills, A2A, WebRTC and AI scribing, WebMCP and AG-UI, clearinghouse and X12), with permissions, audit trails and
+human approval for sensitive actions. Only the foundation is built now; the rest comes later (section 8b).
+
+- **ARC-01 Write architecture decisions for AI and interoperability** · S · P1 · M1 · depends: none
+  One page `platform/ARCHITECTURE.md` fixing the service layer with two entry points, agent identity, the approval model, the audit model and tenant isolation for agents. Resolve the D-09 wording against the client's "single API layer".
+  Done when: the page is reviewed by the lead; D-16 confirmed or changed; open questions in section 8b answered or owned.
+- **FHI-01 Enable and verify FHIR and SMART per practice** · M · P2 · M1 · depends: ARC-01, TEN-03
+  Provisioning turns on the REST and FHIR APIs and sets each practice's site address by default. Register a test SMART app and check the multi-practice issuer and key setup.
+  Done when: a SMART test app reads a Patient from practice A; the same token is refused by practice B; every practice has its own signing keys.
+- **AUD-01 Add agent identity, approvals and audit foundation** · M · P1 · M2 · depends: ARC-01, TEN-03
+  In the platform module: an actor record for "agent acting for user X", a correlation ID on every request, a pending-approval table with approve and reject endpoints, and settings for API log retention.
+  Done when: a sample sensitive action waits for a human approval and runs once; every step appears in the practice's log with the actor and correlation ID.
 
 ### INF: Infrastructure and hosting
 
@@ -548,9 +565,33 @@ Context already agreed, so it is not lost:
 - **Already usable in OpenEMR:** X12 claim creation, remittance posting, acknowledgement handling and an
   SFTP service exist in the code; there is no TriZetto-specific code.
 
+## 8b. AI-native foundation (client request, 10 Nov 2026)
+
+The client asked for a foundation that supports AI later, without slowing the MVP: proper permissions,
+audit trails and human approval for sensitive actions. Tickets: ARC-01, FHI-01, AUD-01.
+
+| Technology | When | What the foundation must give | Already in place |
+|---|---|---|---|
+| FHIR R4 and SMART on FHIR | Phase 1 | API turned on per practice, per-practice issuer and keys, test app (FHI-01) | OpenEMR: FHIR R4, US Core 8.0, SMART v2.2.0 (certified), bulk export, system scopes |
+| MCP and Agent Skills | Later | Token API behind the service layer (D-16); one MCP server per practice, one user per token; no cross-practice agent | OAuth scopes, `api_log` (user, client, patient, request, response) |
+| A2A | Later | Stable documented API, agent identity, approvals (AUD-01) | OpenAPI is generated by OpenEMR |
+| WebRTC, AI scribing | Later | HTTPS (INF-05); a TURN server and UDP ports (the firewall is TCP 80 and 443 only); a separate audio service | Telehealth module in the repo (third party) |
+| WebMCP, AG-UI | Long term | Screen actions go through the same endpoints; no business logic in components | none needed yet |
+| Clearinghouse, X12 | Deferred (D-14) | Claim data in standard form when billing returns | X12 837, 270/271 and 835 code in `src/Billing` |
+| Human approval, audit | Phase 1 foundation | Pending-approval table, agent actor, correlation ID (AUD-01) | `log` with checksum, `api_log`; no approvals |
+
+**Open questions**
+1. **Charge capture.** The client message and the lead's reply say charge capture is in Phase 1; D-14 defers billing. Settle which in writing.
+2. **AI provider and patient data.** Sending PHI to a model needs a signed BAA with the provider. Options: AWS Bedrock under the AWS BAA, or the provider's own BAA. The pilot region (eu-north-1) has limited model availability, and cross-region inference would move data. Decide before any AI feature touches patient data.
+3. **Data region.** Same question as section 5 (is hosting US practices' data in Stockholm acceptable).
+4. **Who owns agent credentials?** Per practice and per user, issued and revoked by the practice admin; the super admin never receives a standing agent token.
+5. **Log retention.** `api_log` stores full request and response bodies (copies of patient data); choose what to keep and for how long.
+
 ## 9. Top risks
 | Risk | Mitigation |
 |---|---|
+| Promises to the client run ahead of the plan (AI foundation, charge capture) | ARC-01 decision record; open questions in 8b answered in writing |
+| AI features send patient data to a provider without a BAA | Decision in 8b before any AI work touches PHI |
 | All settings at launch (especially the form builder) is very large | Prototype SET-04 early; super admin keeps classic pages as a safety net (D-13) |
 | Roadmap is about a year of solo work | Stage delivery with EMB (PLN-02); cut order in section 6 |
 | RDS or ARM behave differently from local tests | Spike inside INF-02 in week 1 |
