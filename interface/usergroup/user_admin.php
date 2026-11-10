@@ -55,6 +55,10 @@ for ($iter = 0; $row = sqlFetchArray($res); $iter++) {
 }
 
 $iter = $result[0];
+// EMB patch (platform/PATCHES.md): the platform's own account cannot be opened here, even by guessing its id.
+if (($iter['username'] ?? '') === 'platform-admin') {
+    exit();
+}
 ?>
 
 <html>

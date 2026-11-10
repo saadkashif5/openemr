@@ -146,6 +146,20 @@ foreach (glob($stateDir . '/*.json') ?: [] as $file) {
         if ($code !== 0 || (int) $after['v_database'] !== $target['database'] || $afterLabel !== $targetLabel) {
             throw new RuntimeException("Upgrade did not reach $targetLabel (now $afterLabel, exit $code)");
         }
+        // An upgrade rewrites tables the platform-admin guard sits on, so put it back (a no-op when it is intact).
+        $repair = proc_open(
+            [PHP_BINARY, __DIR__ . '/provision-practice.php', 'ensure-platform-admin', $domain],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $repairPipes
+        );
+        if (is_resource($repair)) {
+            stream_get_contents($repairPipes[1]);
+            $repairError = stream_get_contents($repairPipes[2]);
+        }
+        if (!is_resource($repair) || proc_close($repair) !== 0) {
+            throw new RuntimeException('Upgraded, but the platform-admin guard could not be re-checked: ' . trim((string) ($repairError ?? '')));
+        }
+        $row['platform_admin_guard'] = 'checked';
         $row['result'] = 'upgraded';
         $row['to'] = $afterLabel;
         $link->close();

@@ -701,7 +701,8 @@ function resetMfaCounter(username) {
                         </tr>
                     <tbody>
                         <?php
-                        $query = "SELECT * FROM users WHERE username != '' ";
+                        // EMB patch (platform/PATCHES.md): the platform's own account is never listed.
+                        $query = "SELECT * FROM users WHERE username != '' AND username != 'platform-admin' ";
                         if (!$form_inactive) {
                             $query .= "AND active = '1' ";
                         }

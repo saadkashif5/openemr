@@ -174,6 +174,38 @@ The site template contains none.
 
 Not covered: the interactive SMART launch with a browser (needs HTTPS and a real domain, INF-05).
 
+## The platform-admin account (TEN-04)
+
+Every practice has one hidden administrator, `platform-admin`, for the super admin (decision D-05). New practices get it
+at creation (step `platform_admin`); for a practice that already exists:
+
+```bash
+php provision-practice.php ensure-platform-admin <domain>   # create it if missing, (re)install the guard, drop TRIGGER; safe to repeat
+php provision-practice.php rotate-platform-admin  <domain> [--secrets-file=PATH]   # new random password, shown once, never stored
+php provision-practice.php verify-platform-admin  <domain>   # tries to change or remove it as the practice user; exit 1 if any attempt succeeds
+```
+
+- **The account:** in Administrators and nothing else, not a provider, not on the calendar. It is created with a random
+  password that is discarded, so nobody can sign in until `rotate-platform-admin` (the one-click open, ADM-01, runs it before
+  each open and again afterwards). A rotation dates the password now, so it is never asked to change it.
+- **The guard** is 14 triggers (`emb_guard_*`) on `users`, `users_secure`, `groups`, `gacl_aro` and `gacl_groups_aro_map`.
+  They refuse, only when the change comes from the practice's own database user (the account the application runs as): deleting
+  or renaming the account, deactivating it, making it a provider, changing its password, adding or removing its groups or
+  group rows, and creating a second account with that name. The worker connects as the database root user, so it is not affected.
+- **Left free on purpose:** the sign-in counters (`login_fail_counter` and friends), and a bare update of the password column,
+  which is what OpenEMR does at sign-in when its hash settings changed (a re-hash).
+- **No TRIGGER privilege:** the practice's database user gets everything except `TRIGGER`, so it cannot drop the guard.
+  The stock installer grants all privileges; `ensure` takes that one back.
+- **Hidden from view** by two small core patches (the Users list and the edit page), listed in `platform/PATCHES.md`. The audit
+  log is left visible on purpose.
+- **After an upgrade**, `upgrade-practices.php` runs `ensure-platform-admin` for each practice it upgraded and fails if the
+  guard cannot be put back. Run `verify-platform-admin` after any OpenEMR upgrade or database restore.
+
+**Limits.** The guard stops practice admins working through OpenEMR. Someone who holds the practice's database password
+(SQL injection, a leaked `sqlconf.php`) can still `DROP` or `ALTER` tables, because OpenEMR's own upgrades need those privileges;
+and anyone with the database root or RDS master login is unrestricted by design. A real password change made within the
+same second as the previous one is not detected (the guard keys on `last_update_password`).
+
 ## Background jobs
 
 Per-practice scheduled work already supports `--site`:

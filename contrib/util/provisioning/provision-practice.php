@@ -13,6 +13,9 @@
  *   php provision-practice.php apply-api-defaults <domain>   REST and FHIR on, site address set (new practices get this already)
  *   php provision-practice.php rotate-oauth-keys <domain>    new OAuth signing keys (for a practice sharing a key)
  *   php provision-practice.php apply-platform-module <domain>  install and enable the platform module and its tables
+ *   php provision-practice.php ensure-platform-admin <domain>  hidden platform account, its guard triggers, no TRIGGER privilege
+ *   php provision-practice.php rotate-platform-admin <domain> [--secrets-file=PATH]   new random password, shown once
+ *   php provision-practice.php verify-platform-admin <domain>  try to change or remove it as the practice user; must all be refused
  *   php provision-practice.php reset-admin <domain> [--username=NAME] [--secrets-file=PATH]
  *   php provision-practice.php destroy <domain> --confirm=<domain>
  *
@@ -137,6 +140,7 @@ final class Provisioner
                 $this->step($state, 'overlay', fn() => $this->applyOverlay($spec));
                 $this->step($state, 'modules', fn() => $this->enableModules($spec));
                 $this->step($state, 'admin_profile', fn() => $this->setAdminProfile($spec, $dbPass));
+                $this->step($state, 'platform_admin', fn() => $this->installPlatformAdmin($spec->dbName, $spec->dbUser));
                 $this->step($state, 'first_login_prompt', function () use ($spec, $dbPass, &$promptArmed): void {
                     $promptArmed = $this->armPasswordChange($spec, $dbPass);
                 });
@@ -302,6 +306,7 @@ final class Provisioner
     }
 
     private const PLATFORM_MODULE = 'oe-module-platform';
+    public const PLATFORM_ADMIN = 'platform-admin';
     private const GOLDEN_DB = 'oe_golden';
     private const GOLDEN_USER = 'u_golden';
     private const GOLDEN_SITE = 'golden-build';
@@ -802,6 +807,342 @@ final class Provisioner
         }
     }
 
+    // ------------------------------------------------------------------------------------------------
+    // The platform-admin account (TEN-04): one hidden administrator per practice, for the super admin.
+    // ------------------------------------------------------------------------------------------------
+
+    /**
+     * Create the hidden account if it is missing, (re)install the database guard and take the TRIGGER privilege
+     * away from the practice's database user. Safe to repeat, so it is also the repair step after an upgrade.
+     *
+     * @return array<string, mixed>
+     */
+    public function ensurePlatformAdmin(string $domain): array
+    {
+        $lock = $this->lock($domain);
+        try {
+            $state = $this->readState($domain);
+            if ($state === null || ($state['status'] ?? '') !== 'active') {
+                throw new RuntimeException("$domain is not an active provisioned practice");
+            }
+            $created = $this->installPlatformAdmin((string) $state['db_name'], (string) $state['db_user']);
+            $this->audit('ensure-platform-admin', $domain);
+            return ['domain' => $domain, 'account' => $created ? 'created' : 'already present', 'guard' => 'installed', 'trigger_privilege' => 'removed'];
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    /**
+     * Account, guard and privilege for one practice database. Returns true when the account was newly created.
+     * The account gets a random password that is never stored or shown: nobody can sign in as it until a worker
+     * rotates it (rotatePlatformAdmin).
+     */
+    private function installPlatformAdmin(string $dbName, string $dbUser): bool
+    {
+        $link = $this->db->connect(null, null, $dbName);
+        try {
+            $created = $this->createPlatformAdminRows($link);
+            $this->installGuardTriggers($link, $dbUser);
+            $this->revokeTriggerPrivilege($link, $dbName, $dbUser);
+            return $created;
+        } finally {
+            $link->close();
+        }
+    }
+
+    private function createPlatformAdminRows(mysqli $link): bool
+    {
+        $name = self::PLATFORM_ADMIN;
+        $adminGroup = $link->query("SELECT id FROM gacl_aro_groups WHERE value = 'admin' OR name = 'Administrators' ORDER BY id LIMIT 1")->fetch_row();
+        if ($adminGroup === null) {
+            throw new RuntimeException('Access-control group "Administrators" not found');
+        }
+        $groupId = (int) $adminGroup[0];
+        $exists = $link->query("SELECT id FROM users WHERE username = '$name'")->fetch_row();
+        if ($exists !== null) {
+            // Already there; still make sure the access-control alias is sound (repairs an earlier bad one).
+            $this->ensureAdministratorMembership($link, $groupId);
+            return false;
+        }
+        // Where the practice's real admin sits: same facility, and the same group name the login looks up.
+        $facility = (int) ($link->query("SELECT facility_id FROM users WHERE authorized = 1 AND username != '$name' ORDER BY id LIMIT 1")->fetch_row()[0] ?? 0);
+        $groupName = (string) ($link->query("SELECT name FROM `groups` WHERE user != '$name' ORDER BY id LIMIT 1")->fetch_row()[0] ?? 'Default');
+        $hash = password_hash(self::secret(40), PASSWORD_DEFAULT);
+
+        $link->begin_transaction();
+        try {
+            // Not a provider (authorized 0), not on the calendar, and with a password nobody knows.
+            $stmt = $link->prepare(
+                "INSERT INTO users (username, password, authorized, fname, lname, active, facility_id, see_auth, calendar)"
+                . " VALUES (?, 'NoLongerUsed', 0, 'Platform', 'Admin', 1, ?, 1, 0)"
+            );
+            $stmt->bind_param('si', $name, $facility);
+            $stmt->execute();
+            $userId = (int) $link->insert_id;
+
+            $stmt = $link->prepare('INSERT INTO users_secure (id, username, password, last_update_password) VALUES (?, ?, ?, NOW())');
+            $stmt->bind_param('iss', $userId, $name, $hash);
+            $stmt->execute();
+
+            $stmt = $link->prepare('INSERT INTO `groups` (name, user) VALUES (?, ?)');
+            $stmt->bind_param('ss', $groupName, $name);
+            $stmt->execute();
+
+            $this->ensureAdministratorMembership($link, $groupId);
+            $link->commit();
+        } catch (Throwable $e) {
+            $link->rollback();
+            throw $e;
+        }
+        return true;
+    }
+
+    /**
+     * Put the account in the Administrators group the way phpGACL does: an access-control alias whose id comes from
+     * the gacl_aro_seq sequence (the id column is not auto-numbered; a missing id would be stored as 0 and the login
+     * would refuse the user as "not in any group"), linked to the group. Repairs an alias with id 0.
+     */
+    private function ensureAdministratorMembership(mysqli $link, int $groupId): void
+    {
+        $name = self::PLATFORM_ADMIN;
+        $aro = $link->query("SELECT id FROM gacl_aro WHERE section_value = 'users' AND value = '$name' LIMIT 1")->fetch_row();
+        if ($aro !== null && (int) $aro[0] === 0) {
+            $link->query("DELETE FROM gacl_groups_aro_map WHERE aro_id = 0");
+            $link->query("DELETE FROM gacl_aro WHERE id = 0 AND value = '$name'");
+            $aro = null;
+        }
+        if ($aro === null) {
+            $link->query('UPDATE gacl_aro_seq SET id = LAST_INSERT_ID(id + 1)');
+            $aroId = (int) $link->query('SELECT LAST_INSERT_ID()')->fetch_row()[0];
+            if ($aroId <= 0) {
+                throw new RuntimeException('Could not allocate an access-control id');
+            }
+            $link->query("INSERT INTO gacl_aro (id, section_value, value, order_value, name, hidden) VALUES ($aroId, 'users', '$name', 10, 'Platform Admin', 0)");
+        } else {
+            $aroId = (int) $aro[0];
+        }
+        $link->query("INSERT IGNORE INTO gacl_groups_aro_map (group_id, aro_id) VALUES ($groupId, $aroId)");
+        // Administrators and nothing else: drop any other membership (repairs tampering from before the guard).
+        $link->query("DELETE FROM gacl_groups_aro_map WHERE aro_id = $aroId AND group_id != $groupId");
+    }
+
+    /**
+     * Triggers that refuse any change to the account when it comes from the practice's own database user, which is
+     * the account the application runs as. The worker connects as the database root user, so it is not affected.
+     * Dropped and recreated each time, so a repeat run repairs them.
+     */
+    private function installGuardTriggers(mysqli $link, string $dbUser): void
+    {
+        $app = "SUBSTRING_INDEX(USER(), '@', 1) = '" . $link->real_escape_string($dbUser) . "'";
+        $pa = "'" . self::PLATFORM_ADMIN . "'";
+        $refuse = "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'platform-admin is protected'";
+        $aroOfPa = "(SELECT id FROM gacl_aro WHERE value = $pa LIMIT 1)";
+
+        $guards = [
+            'emb_guard_users_ins' => ['users', 'BEFORE INSERT', "NEW.username = $pa"],
+            'emb_guard_users_upd' => ['users', 'BEFORE UPDATE', "(OLD.username = $pa OR NEW.username = $pa) AND (NOT (OLD.username <=> NEW.username) OR NOT (OLD.active <=> NEW.active) OR NOT (OLD.authorized <=> NEW.authorized))"],
+            'emb_guard_users_del' => ['users', 'BEFORE DELETE', "OLD.username = $pa"],
+            'emb_guard_secure_ins' => ['users_secure', 'BEFORE INSERT', "NEW.username = $pa"],
+            // A real password change (it always sets last_update_password and may shift the history) and a rename are
+            // refused. Left free: the login counters, and a bare update of the password column alone, which is what
+            // OpenEMR itself does at sign-in when its hash settings changed (a re-hash); blocking that would lock
+            // the account out. No OpenEMR screen can make a bare password-only update.
+            'emb_guard_secure_upd' => ['users_secure', 'BEFORE UPDATE', "(OLD.username = $pa OR NEW.username = $pa) AND (NOT (OLD.username <=> NEW.username) OR NOT (OLD.last_update_password <=> NEW.last_update_password) OR NOT (OLD.password_history1 <=> NEW.password_history1) OR NOT (OLD.password_history2 <=> NEW.password_history2) OR NOT (OLD.password_history3 <=> NEW.password_history3) OR NOT (OLD.password_history4 <=> NEW.password_history4))"],
+            'emb_guard_secure_del' => ['users_secure', 'BEFORE DELETE', "OLD.username = $pa"],
+            // The group rows (the login's "provider group"): no adding a second one and deleting the first.
+            'emb_guard_groups_ins' => ['`groups`', 'BEFORE INSERT', "NEW.user = $pa"],
+            'emb_guard_groups_upd' => ['`groups`', 'BEFORE UPDATE', "OLD.user = $pa OR NEW.user = $pa"],
+            'emb_guard_groups_del' => ['`groups`', 'BEFORE DELETE', "OLD.user = $pa"],
+            'emb_guard_aro_upd' => ['gacl_aro', 'BEFORE UPDATE', "OLD.value = $pa"],
+            'emb_guard_aro_del' => ['gacl_aro', 'BEFORE DELETE', "OLD.value = $pa"],
+            // Not a member of any other group either: a practice admin must not be able to widen the account.
+            'emb_guard_map_ins' => ['gacl_groups_aro_map', 'BEFORE INSERT', "NEW.aro_id = $aroOfPa"],
+            'emb_guard_map_upd' => ['gacl_groups_aro_map', 'BEFORE UPDATE', "OLD.aro_id = $aroOfPa"],
+            'emb_guard_map_del' => ['gacl_groups_aro_map', 'BEFORE DELETE', "OLD.aro_id = $aroOfPa"],
+        ];
+        foreach ($guards as $name => [$table, $when, $condition]) {
+            $link->query("DROP TRIGGER IF EXISTS $name");
+            $link->query("CREATE TRIGGER $name $when ON $table FOR EACH ROW BEGIN IF ($condition) AND $app THEN $refuse; END IF; END");
+        }
+    }
+
+    /**
+     * The practice user must not be able to remove the triggers, so it must not hold TRIGGER. The stock installer
+     * grants everything; take that one privilege back. A no-op when it is already gone.
+     */
+    private function revokeTriggerPrivilege(mysqli $link, string $dbName, string $dbUser): void
+    {
+        $user = $link->real_escape_string($dbUser);
+        $host = $link->real_escape_string($this->db->loginHost);
+        try {
+            $link->query("REVOKE TRIGGER ON `$dbName`.* FROM '$user'@'$host'");
+        } catch (mysqli_sql_exception $e) {
+            if ($this->holdsTriggerPrivilege($link, $dbName, $user, $host)) {
+                throw $e;
+            }
+        }
+        if ($this->holdsTriggerPrivilege($link, $dbName, $user, $host)) {
+            throw new RuntimeException('The practice database user still holds the TRIGGER privilege');
+        }
+    }
+
+    private function holdsTriggerPrivilege(mysqli $link, string $dbName, string $user, string $host): bool
+    {
+        $result = $link->query("SHOW GRANTS FOR '$user'@'$host'");
+        while ($row = $result->fetch_row()) {
+            $grant = (string) $row[0];
+            // A grant on this database, or a global one, that includes TRIGGER (directly or through ALL PRIVILEGES).
+            $applies = str_contains($grant, " ON `$dbName`.* ") || str_contains($grant, ' ON *.* ');
+            if ($applies && (preg_match('/\bTRIGGER\b/', $grant) === 1 || str_contains($grant, 'ALL PRIVILEGES'))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Give the platform account a new random password and return it once. Meant to run just before the super admin
+     * opens the practice (ADM-01), and again afterwards so the used password stops working. The password is never stored.
+     *
+     * @return array<string, mixed>
+     */
+    public function rotatePlatformAdmin(string $domain, ?string $secretsFile): array
+    {
+        $lock = $this->lock($domain);
+        try {
+            $state = $this->readState($domain);
+            if ($state === null || ($state['status'] ?? '') !== 'active') {
+                throw new RuntimeException("$domain is not an active provisioned practice");
+            }
+            $secretsHandle = self::reserveSecretsFile($secretsFile);
+            try {
+                $password = self::secret(24);
+                $hash = password_hash($password, PASSWORD_DEFAULT);
+                $link = $this->db->connect(null, null, (string) $state['db_name']);
+                // Dated now, so the account is never asked to change it; counters cleared so it is never locked out.
+                $name = self::PLATFORM_ADMIN;
+                $stmt = $link->prepare(
+                    'UPDATE users_secure SET password = ?, last_update_password = NOW(), password_history1 = NULL, password_history2 = NULL,'
+                    . ' password_history3 = NULL, password_history4 = NULL, login_fail_counter = 0, last_login_fail = NULL WHERE username = ?'
+                );
+                $stmt->bind_param('ss', $hash, $name);
+                $stmt->execute();
+                if ($stmt->affected_rows !== 1) {
+                    throw new RuntimeException("$domain has no platform account: run ensure-platform-admin");
+                }
+                $link->query("UPDATE users SET active = 1 WHERE username = '$name'");
+                $link->close();
+            } catch (Throwable $e) {
+                self::discardSecretsFile($secretsHandle, $secretsFile);
+                throw $e;
+            }
+            $this->audit('rotate-platform-admin', $domain);
+            return ['domain' => $domain, 'admin' => self::deliverSecret(self::PLATFORM_ADMIN, $password, $secretsHandle, $secretsFile)];
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    /**
+     * Check the guard from the outside: connect as the practice's own database user, try to change or remove the
+     * account in every way a practice admin could, and confirm each is refused while normal sign-in writes still work.
+     * Nothing is changed (every attempt runs in a transaction that is rolled back).
+     *
+     * @return array<string, mixed> checks and an overall result
+     */
+    public function verifyPlatformAdmin(string $domain): array
+    {
+        $state = $this->readState($domain);
+        if ($state === null || ($state['status'] ?? '') !== 'active') {
+            throw new RuntimeException("$domain is not an active provisioned practice");
+        }
+        $dbName = (string) $state['db_name'];
+        $dbUser = (string) $state['db_user'];
+        $name = self::PLATFORM_ADMIN;
+        $checks = [];
+
+        $root = $this->db->connect(null, null, $dbName);
+        $row = $root->query("SELECT authorized, active FROM users WHERE username = '$name'")->fetch_assoc();
+        $checks['account_exists_active'] = $row !== null && (int) $row['active'] === 1;
+        $checks['not_a_provider'] = $row !== null && (int) $row['authorized'] === 0;
+        // id > 0 matters: an alias stored with id 0 still "joins" but the login refuses the user as in no group.
+        $checks['in_administrators'] = (bool) $root->query(
+            "SELECT 1 FROM gacl_groups_aro_map m JOIN gacl_aro a ON a.id = m.aro_id JOIN gacl_aro_groups g ON g.id = m.group_id"
+            . " WHERE a.value = '$name' AND a.section_value = 'users' AND a.id > 0 AND g.name = 'Administrators'"
+        )->fetch_row();
+        $checks['password_is_set'] = (bool) $root->query("SELECT 1 FROM users_secure WHERE username = '$name' AND password != ''")->fetch_row();
+        $checks['database_user_lacks_trigger_privilege'] = !$this->holdsTriggerPrivilege(
+            $root,
+            $dbName,
+            $root->real_escape_string($dbUser),
+            $root->real_escape_string($this->db->loginHost)
+        );
+        $guards = (int) $root->query("SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema = DATABASE() AND trigger_name LIKE 'emb\\_guard\\_%'")->fetch_row()[0];
+        $checks['guard_triggers_present'] = $guards === 14;
+        $checks['only_in_administrators'] = (int) $root->query(
+            "SELECT COUNT(*) FROM gacl_groups_aro_map m JOIN gacl_aro a ON a.id = m.aro_id WHERE a.value = '$name'"
+        )->fetch_row()[0] === 1;
+        $root->close();
+
+        // From here on we are the application: the practice's own database account, read from its sqlconf.php.
+        $creds = (static function (string $file): array {
+            require $file;
+            return ['host' => $host, 'port' => (int) $port, 'user' => $login, 'pass' => $pass, 'db' => $dbase];
+        })("{$this->sitesDir}/$domain/sqlconf.php");
+        mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+        $app = new mysqli($creds['host'], $creds['user'], $creds['pass'], $creds['db'], $creds['port']);
+
+        $refused = function (string $sql) use ($app): bool {
+            $app->begin_transaction();
+            try {
+                $app->query($sql);
+                return false;
+            } catch (mysqli_sql_exception $e) {
+                return str_contains($e->getMessage(), 'platform-admin is protected');
+            } finally {
+                $app->rollback();
+            }
+        };
+        $allowed = function (string $sql) use ($app): bool {
+            $app->begin_transaction();
+            try {
+                $app->query($sql);
+                return true;
+            } catch (mysqli_sql_exception) {
+                return false;
+            } finally {
+                $app->rollback();
+            }
+        };
+        $checks['refused_delete_user'] = $refused("DELETE FROM users WHERE username = '$name'");
+        $checks['refused_deactivate'] = $refused("UPDATE users SET active = 0 WHERE username = '$name'");
+        $checks['refused_make_provider'] = $refused("UPDATE users SET authorized = 1 WHERE username = '$name'");
+        $checks['refused_rename'] = $refused("UPDATE users SET username = 'someone-else' WHERE username = '$name'");
+        $checks['refused_rename_another_to_it'] = $refused("UPDATE users SET username = '$name' WHERE username != '$name' LIMIT 1");
+        $checks['refused_duplicate_account'] = $refused("INSERT INTO users (username) VALUES ('$name')");
+        // A password change as OpenEMR makes it (new hash and a new last_update_password).
+        $checks['refused_password_change'] = $refused("UPDATE users_secure SET password = 'x', last_update_password = DATE_ADD(IFNULL(last_update_password, NOW()), INTERVAL 1 DAY) WHERE username = '$name'");
+        $checks['refused_delete_secure_row'] = $refused("DELETE FROM users_secure WHERE username = '$name'");
+        $checks['refused_delete_group_row'] = $refused("DELETE FROM `groups` WHERE user = '$name'");
+        $checks['refused_add_group_row'] = $refused("INSERT INTO `groups` (name, user) VALUES ('Other', '$name')");
+        $checks['refused_remove_from_administrators'] = $refused("DELETE FROM gacl_groups_aro_map WHERE aro_id = (SELECT id FROM gacl_aro WHERE value = '$name')");
+        $checks['refused_delete_acl_alias'] = $refused("DELETE FROM gacl_aro WHERE value = '$name'");
+        $checks['refused_add_to_another_group'] = $refused("INSERT INTO gacl_groups_aro_map (group_id, aro_id) SELECT 12, id FROM gacl_aro WHERE value = '$name'");
+        // (Removing a trigger is stopped by the missing TRIGGER privilege, checked above; it is not tried here, because
+        // a DROP cannot be rolled back and would remove the guard if it were ever broken.)
+        // Normal operation must be untouched: sign-in counters on the account, and editing any other user.
+        // OpenEMR re-hashes at sign-in when its hash settings changed: a bare update of the password column.
+        $checks['rehash_at_signin_still_allowed'] = $allowed("UPDATE users_secure SET password = CONCAT('\$2y\$12\$', 'rehash-check') WHERE username = '$name'");
+        $checks['login_counters_still_update'] =$allowed("UPDATE users_secure SET login_fail_counter = login_fail_counter + 1, last_login_fail = NOW(), total_login_fail_counter = total_login_fail_counter + 1 WHERE username = '$name'");
+        $checks['other_users_still_editable'] = $allowed("UPDATE users SET fname = 'Checked' WHERE username != '$name' AND authorized = 1 LIMIT 1");
+        $app->close();
+
+        return ['domain' => $domain, 'passed' => !in_array(false, $checks, true), 'checks' => $checks];
+    }
+
     /**
      * Give a practice's admin a new random password (for a lost or never-delivered one) and re-arm the
      * first-login prompt. Works on the database directly, using the same hashing as the installer.
@@ -1241,6 +1582,13 @@ try {
         'apply-api-defaults' => $provisioner->applyApiDefaults($args[1] ?? fail('apply-api-defaults needs a domain', 2)),
         'rotate-oauth-keys' => $provisioner->rotateOauthKeys($args[1] ?? fail('rotate-oauth-keys needs a domain', 2)),
         'apply-platform-module' => $provisioner->applyPlatformModule($args[1] ?? fail('apply-platform-module needs a domain', 2)),
+        'ensure-platform-admin' => $provisioner->ensurePlatformAdmin($args[1] ?? fail('ensure-platform-admin needs a domain', 2)),
+        'rotate-platform-admin' => $provisioner->rotatePlatformAdmin($args[1] ?? fail('rotate-platform-admin needs a domain', 2), $opts['secrets-file'] ?? null),
+        'verify-platform-admin' => (function () use ($provisioner, $args): array {
+            $report = $provisioner->verifyPlatformAdmin($args[1] ?? fail('verify-platform-admin needs a domain', 2));
+            echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";
+            exit($report['passed'] ? 0 : 1);
+        })(),
         'reset-admin' => $provisioner->resetAdmin(
             $args[1] ?? fail('reset-admin needs a domain', 2),
             $opts['username'] ?? null,
@@ -1253,7 +1601,7 @@ try {
             }
             return $provisioner->destroy($domain);
         })(),
-        default => fail("Usage: provision-practice.php create|build-golden|status|list|apply-api-defaults|rotate-oauth-keys|apply-platform-module|reset-admin|destroy (see header of this file)", 2),
+        default => fail("Usage: provision-practice.php create|build-golden|status|list|apply-api-defaults|rotate-oauth-keys|apply-platform-module|ensure-platform-admin|rotate-platform-admin|verify-platform-admin|reset-admin|destroy (see header of this file)", 2),
     };
     echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";
 } catch (PracticeExistsException $e) {
