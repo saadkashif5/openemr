@@ -12,6 +12,7 @@
  *   php provision-practice.php list
  *   php provision-practice.php apply-api-defaults <domain>   REST and FHIR on, site address set (new practices get this already)
  *   php provision-practice.php rotate-oauth-keys <domain>    new OAuth signing keys (for a practice sharing a key)
+ *   php provision-practice.php apply-platform-module <domain>  install and enable the platform module and its tables
  *   php provision-practice.php reset-admin <domain> [--username=NAME] [--secrets-file=PATH]
  *   php provision-practice.php destroy <domain> --confirm=<domain>
  *
@@ -264,6 +265,8 @@ final class Provisioner
             'rest_portal_api' => '0',
             'rest_system_scopes_api' => '0',
             'oauth_password_grant' => '0',
+            // Minimal API log: who, what, when and which patient, without request and response bodies (copies of patient data).
+            'api_log_option' => '1',
             'site_addr_oath' => "$scheme://$domain",
         ];
     }
@@ -625,12 +628,23 @@ final class Provisioner
      */
     private function enableModules(PracticeSpec $spec): void
     {
-        // Every practice gets our platform module (shell launcher and endpoints), whatever the spec lists.
-        $modules = array_values(array_unique([self::PLATFORM_MODULE, ...$spec->modules]));
-        $this->console($spec, ['--modaction=discover']);
+        $this->enableModulesFor($spec->domain, $spec->modules);
+    }
+
+    /**
+     * Install and enable modules in one practice. Our platform module is always included (shell launcher, endpoints,
+     * approvals) and is the one that ships tables, so it also gets the module's own SQL step.
+     *
+     * @param list<string> $requested
+     */
+    private function enableModulesFor(string $domain, array $requested): void
+    {
+        $modules = array_values(array_unique([self::PLATFORM_MODULE, ...$requested]));
+        $this->console($domain, ['--modaction=discover']);
         foreach ($modules as $module) {
-            foreach (['install', 'enable'] as $action) {
-                $output = $this->console($spec, ["--modaction=$action", "--modname=$module"]);
+            $actions = $module === self::PLATFORM_MODULE ? ['install', 'install_sql', 'enable'] : ['install', 'enable'];
+            foreach ($actions as $action) {
+                $output = $this->console($domain, ["--modaction=$action", "--modname=$module"]);
                 // Some modules (Weno, fax, ...) refuse to enable until the practice has its own credentials.
                 // That is not a provisioning failure: leave the module installed but disabled and carry on.
                 if ($action === 'enable' && preg_match('/not configured|please configure/i', $output) === 1) {
@@ -649,9 +663,9 @@ final class Provisioner
      * @param list<string> $args
      * @return string combined output
      */
-    private function console(PracticeSpec $spec, array $args): string
+    private function console(string $domain, array $args): string
     {
-        $cmd = [PHP_BINARY, $this->root . '/bin/console', 'openemr:zfc-module', '--site=' . $spec->domain, ...$args];
+        $cmd = [PHP_BINARY, $this->root . '/bin/console', 'openemr:zfc-module', '--site=' . $domain, ...$args];
         $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $this->root);
         if (!is_resource($proc)) {
             throw new RuntimeException('Cannot start the module console command');
@@ -726,6 +740,29 @@ final class Provisioner
             $link->close();
             $this->audit('apply-api-defaults', $domain);
             return ['domain' => $domain, 'applied' => $applied];
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    /**
+     * Install (or update) and enable the platform module in a practice that already exists, including its tables.
+     * New practices get this at creation. Safe to repeat.
+     *
+     * @return array<string, mixed>
+     */
+    public function applyPlatformModule(string $domain): array
+    {
+        $lock = $this->lock($domain);
+        try {
+            $state = $this->readState($domain);
+            if ($state === null || ($state['status'] ?? '') !== 'active') {
+                throw new RuntimeException("$domain is not an active provisioned practice");
+            }
+            $this->enableModulesFor($domain, []);
+            $this->audit('apply-platform-module', $domain);
+            return ['domain' => $domain, 'module' => self::PLATFORM_MODULE, 'status' => 'installed and enabled'];
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -1203,6 +1240,7 @@ try {
         'build-golden' => $provisioner->buildGolden(),
         'apply-api-defaults' => $provisioner->applyApiDefaults($args[1] ?? fail('apply-api-defaults needs a domain', 2)),
         'rotate-oauth-keys' => $provisioner->rotateOauthKeys($args[1] ?? fail('rotate-oauth-keys needs a domain', 2)),
+        'apply-platform-module' => $provisioner->applyPlatformModule($args[1] ?? fail('apply-platform-module needs a domain', 2)),
         'reset-admin' => $provisioner->resetAdmin(
             $args[1] ?? fail('reset-admin needs a domain', 2),
             $opts['username'] ?? null,
@@ -1215,7 +1253,7 @@ try {
             }
             return $provisioner->destroy($domain);
         })(),
-        default => fail("Usage: provision-practice.php create|build-golden|status|list|apply-api-defaults|rotate-oauth-keys|reset-admin|destroy (see header of this file)", 2),
+        default => fail("Usage: provision-practice.php create|build-golden|status|list|apply-api-defaults|rotate-oauth-keys|apply-platform-module|reset-admin|destroy (see header of this file)", 2),
     };
     echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";
 } catch (PracticeExistsException $e) {

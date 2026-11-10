@@ -67,25 +67,43 @@ with the **approver's** permissions, not the agent's; pending items expire; the 
 Sensitive actions (to be listed per feature): signing notes, prescribing, placing orders, messaging patients,
 deleting data, submitting claims, bulk export.
 
+**As built (AUD-01, 10 Nov 2026)**, in `interface/modules/custom_modules/oe-module-platform/`: `ApprovalService`
+(propose, approve, reject, expire), a handler interface per action type (one built-in `platform.sample`), table
+`platform_approval`, endpoint `public/approvals.php` (list, approve, reject; CSRF; session). Verified end to end: a
+proposal by agent `scribe-agent` acting for a user waited; a signed-in admin approved it; it ran once as that admin;
+a second approval, a missing CSRF token and a signed-out call were all refused; the decision is one atomic
+`UPDATE`, so two simultaneous approvals cannot both run it.
+
+Not built yet, on purpose: the agent-facing **propose** route (it arrives with the first agent feature; today
+`ApprovalService::propose` is called from code), a screen for approvers (shell, M2), and real action handlers.
+`ActorResolver::fromRestRequest` (an OAuth request becomes an agent actor) exists but has not yet been exercised by a real REST route.
+
 ## 5. Audit
 
 | Layer | Where | Records |
 |---|---|---|
 | OpenEMR | `log` (with checksum) and `api_log` in each practice database | user, patient, event; API user, client, patient, request, response |
-| Platform module (AUD-01) | same databases | adds actor type (human or agent), on-behalf-of, correlation ID, approval steps |
+| Platform module (AUD-01, built) | same `log` table, event `platform` | each approval step with `corr=` (the approval's correlation id) and `actor=human:<user>` or `actor=agent:<client> for:<user>` |
 | Platform | `oe_platform.audit_log` | super-admin actions: create, pause, open practice |
 
-`api_log` stores full request and response bodies (copies of patient data). Retention and what to keep is a
+`api_log` can store full request and response bodies (copies of patient data). **Default for new practices is now
+minimal logging** (`api_log_option = 1`: who, what, when, patient; no bodies), and `bin/purge-api-log.php` deletes rows
+older than the practice's retention setting (default 90 days). Whether to keep bodies, and for how long, is still a
 decision (plan section 8b, question 5). Logs stay inside the practice database, so a practice's audit trail
 is deleted or exported with that practice.
+
+Limits to know: the correlation id is created for our module endpoints and for approvals; it is not on OpenEMR's
+legacy pages, and `api_log` has no column for it, so token API calls are linked to approvals through the user, client
+and time rather than the id. An approval that expires is recorded in `platform_approval` (status and time) but not as a
+`log` entry. OpenEMR keeps the tamper-evidence checksum in `log_comment_encrypt` (our entries have one), not in `log.checksum`.
 
 ## 6. Interoperability (Phase 1)
 
 - OpenEMR provides FHIR R4, US Core 8.0 and SMART on FHIR v2.2.0. Per practice the endpoints are
   `https://<practice-domain>/apis/<site>/fhir` and `/oauth2/<site>/...`. The site id is the practice's site
   folder name, which in our provisioning is its domain.
-- Provisioning must set, by default, the API globals (`rest_api`, `rest_fhir_api`) and the practice's
-  `site_addr_oath`. The mechanism exists (`globals` in the spec) but nothing sets them yet (FHI-01).
+- Provisioning sets, by default, the API globals (`rest_api`, `rest_fhir_api`) and the practice's `site_addr_oath`
+  (FHI-01, done); `apply-api-defaults <domain>` does the same for an existing practice.
 - Each practice must have its own OAuth signing keys, created in its own
   `sites/<site>/documents/certificates/oaprivate.key`, never copied from another site, the golden database or
   the image. **Verified locally (10 Nov 2026, FHI-01):** practices created from our clean site template get

@@ -18,11 +18,13 @@ require_once __DIR__ . '/../../../../globals.php';
 
 use OpenEMR\Common\Http\CurrentRequest;
 use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Modules\Platform\Actor\CorrelationId;
 use OpenEMR\Modules\Platform\Health\HealthService;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Response;
 
-$headers = ['Cache-Control' => 'no-store', 'X-Content-Type-Options' => 'nosniff'];
+$correlationId = CorrelationId::fromHeaderOrNew(CurrentRequest::get()->headers->get(CorrelationId::HEADER));
+$headers = [CorrelationId::HEADER => $correlationId, 'Cache-Control' => 'no-store', 'X-Content-Type-Options' => 'nosniff'];
 
 if (!in_array(CurrentRequest::get()->getMethod(), ['GET', 'HEAD'], true)) {
     (new JsonResponse(['status' => 'method not allowed'], Response::HTTP_METHOD_NOT_ALLOWED, $headers + ['Allow' => 'GET, HEAD']))->send();

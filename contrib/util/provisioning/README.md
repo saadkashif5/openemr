@@ -151,9 +151,13 @@ backend (`system/*`) tokens and the password grant off, and `site_addr_oath` set
 (`PROVISION_PUBLIC_SCHEME=http` in a local test stack). A specialty template or the spec's `globals` can override.
 
 ```bash
-php provision-practice.php apply-api-defaults <domain>   # same settings, for a practice that already exists
-php provision-practice.php rotate-oauth-keys  <domain>   # new OAuth signing keys; older tokens stop working
+php provision-practice.php apply-api-defaults    <domain>   # same settings, for a practice that already exists
+php provision-practice.php rotate-oauth-keys     <domain>   # new OAuth signing keys; older tokens stop working
+php provision-practice.php apply-platform-module <domain>   # platform module and its tables, for a practice that already exists
 ```
+
+New practices also get `api_log_option = 1` (minimal API log, no request or response bodies) and the platform module
+(`oe-module-platform`), installed with its SQL step and enabled, whatever the spec's `modules` lists.
 
 Each practice keeps its own signing keys in `sites/<domain>/documents/certificates/`, created on first OAuth use.
 The site template contains none.

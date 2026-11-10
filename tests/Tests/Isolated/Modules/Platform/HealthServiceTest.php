@@ -12,8 +12,8 @@ declare(strict_types=1);
 
 namespace OpenEMR\Tests\Isolated\Modules\Platform;
 
-use Composer\Autoload\ClassLoader;
 use OpenEMR\Modules\Platform\Health\HealthService;
+use OpenEMR\Tests\Isolated\Modules\Platform\Support\RegistersPlatformModule;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Session\Session;
 use Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage;
@@ -24,23 +24,7 @@ use Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage;
  */
 final class HealthServiceTest extends TestCase
 {
-    /**
-     * @codeCoverageIgnore Fixture wiring; runs before coverage attribution.
-     */
-    public static function setUpBeforeClass(): void
-    {
-        $loaders = ClassLoader::getRegisteredLoaders();
-        if ($loaders === []) {
-            self::fail('Composer ClassLoader not available to register module autoload prefix.');
-        }
-        // More than one loader can be registered under PHPUnit; the first is not always the one that resolves classes.
-        foreach ($loaders as $loader) {
-            $loader->addPsr4(
-                'OpenEMR\\Modules\\Platform\\',
-                dirname(__DIR__, 5) . '/interface/modules/custom_modules/oe-module-platform/src/'
-            );
-        }
-    }
+    use RegistersPlatformModule;
 
     /** @param array<string, mixed> $attributes */
     private function session(array $attributes): Session
