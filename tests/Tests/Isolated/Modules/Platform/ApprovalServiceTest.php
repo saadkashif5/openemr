@@ -96,6 +96,20 @@ final class ApprovalServiceTest extends TestCase
         self::assertTrue(CorrelationId::isValid($approval->correlationId));
     }
 
+    public function testAnAgentCannotProposeWhatItsUserCouldNotDoThemselves(): void
+    {
+        $agentForFrontDesk = ActorContext::agent('scribe-agent', 9, 'front_desk', CorrelationId::generate());
+
+        $this->expectApprovalError(ApprovalError::Forbidden);
+        try {
+            $this->service->propose($agentForFrontDesk, 'test.action', 'note/12', []);
+        } finally {
+            self::assertCount(0, $this->repository->listPending($this->clock->now()));
+            self::assertSame(['approval.denied'], $this->audit->events());
+            self::assertFalse($this->audit->entries[0]['success']);
+        }
+    }
+
     public function testApprovedActionRunsOnceAsTheApproverWithTheProposedPayload(): void
     {
         $payload = ['text' => 'sign this', 'note_id' => 12];

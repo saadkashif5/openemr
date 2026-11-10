@@ -1,8 +1,8 @@
 <?php
 
 /**
- * EMB platform module bootstrap. Loaded on every request while the module is enabled in a practice.
- * It only registers the namespace; endpoints live under public/ and are called directly.
+ * EMB platform module bootstrap. Loaded on every request while the module is enabled in a practice. It registers
+ * the namespace and the token API routes; the session endpoints live under public/ and are called directly.
  *
  * @package   OpenEMR
  * @link      https://www.open-emr.org
@@ -13,6 +13,10 @@ declare(strict_types=1);
 
 use OpenEMR\Core\ModulesClassLoader;
 use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Modules\Platform\Bootstrap;
 
-$classLoader = new ModulesClassLoader(OEGlobalsBag::getInstance()->getProjectDir());
+$globalsBag = OEGlobalsBag::getInstance();
+$classLoader = new ModulesClassLoader($globalsBag->getProjectDir());
 $classLoader->registerNamespaceIfNotExists('OpenEMR\\Modules\\Platform\\', __DIR__ . DIRECTORY_SEPARATOR . 'src');
+
+(new Bootstrap($globalsBag->getKernel()->getEventDispatcher()))->subscribeToEvents();

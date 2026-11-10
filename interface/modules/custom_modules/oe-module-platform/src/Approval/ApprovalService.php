@@ -46,8 +46,12 @@ final readonly class ApprovalService
      */
     public function propose(ActorContext $proposer, string $actionType, string $resource, array $payload, ?int $patientId = null): Approval
     {
-        if ($this->handlers->get($actionType) === null) {
-            throw ApprovalException::because(ApprovalError::UnknownAction);
+        $handler = $this->handlers->get($actionType) ?? throw ApprovalException::because(ApprovalError::UnknownAction);
+        // An agent acts for a person and can never ask for more than that person could do. A proposal the person
+        // could not approve themselves is refused, so nobody is asked to approve something they may not allow.
+        if (!$this->permissions->allows($proposer, ...$handler->requiredAcl())) {
+            $this->audit->record('approval.denied', $proposer, $proposer->correlationId, $patientId, sprintf('action=%s resource=%s proposal refused', $actionType, $resource), false);
+            throw ApprovalException::because(ApprovalError::Forbidden);
         }
         $now = $this->clock->now();
         $approval = $this->repository->insert(new NewApproval(

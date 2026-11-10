@@ -14,6 +14,15 @@ Design: `platform/ARCHITECTURE.md`.
 
 Every response carries `X-Correlation-Id` (the caller's, if it is a valid UUID, otherwise a new one).
 
+## Token API (the agent door)
+
+| Endpoint | Method | Result |
+|---|---|---|
+| `/apis/<site>/api/platform_approval` | POST, bearer token with scope `user/platform_approval.write` | body `{"action_type","resource","patient_id","payload"}`; `201` pending with `approval_id` and `correlation_id`. Nothing runs. `400` bad input or unknown action, `401` no token or no scope, `403` the user the agent acts for could not do the action |
+
+Registered in `src/Bootstrap.php` (route and scope) and handled by `src/Api/ApprovalApi.php`. A person decides through
+`public/approvals.php`; both doors use the same `ApprovalService`.
+
 ## Human approval (AUD-01)
 
 An agent (or any caller) **proposes** an action; a person with the required permission **approves or rejects** it; an

@@ -74,9 +74,16 @@ proposal by agent `scribe-agent` acting for a user waited; a signed-in admin app
 a second approval, a missing CSRF token and a signed-out call were all refused; the decision is one atomic
 `UPDATE`, so two simultaneous approvals cannot both run it.
 
-Not built yet, on purpose: the agent-facing **propose** route (it arrives with the first agent feature; today
-`ApprovalService::propose` is called from code), a screen for approvers (shell, M2), and real action handlers.
-`ActorResolver::fromRestRequest` (an OAuth request becomes an agent actor) exists but has not yet been exercised by a real REST route.
+**The agent door (built after review, 10 Nov 2026):** `POST /apis/<site>/api/platform_approval` with a bearer token, in
+the module's `Bootstrap` (route and the scope `user/platform_approval.write`) and `Api/ApprovalApi`. The token names the agent
+(client) and the user it acts for (`ActorResolver::fromRestRequest`). It only opens a pending approval (201); it never runs
+anything. A proposal is refused unless the user the agent acts for could do the action themselves, so an agent cannot ask for
+more than that user may. Verified: a token with the scope proposed an action, a token without it was refused (401), bad input
+got 400, the approval recorded the agent's client id and the user, and the signed-in admin then approved it through the
+session door, once. The log shows `actor=agent:<client> for:<user>` on the proposal and `actor=human:<user>` on the decision.
+This is the "two entry points, one service" rule working: the same `ApprovalService` and permission check serve both doors.
+
+Not built yet, on purpose: a screen for approvers (shell, M2) and real action handlers (they come with each feature).
 
 ## 5. Audit
 
@@ -139,3 +146,9 @@ also what lets WebMCP or AG-UI describe the interface to an agent later. No busi
    (AUD-01).
 5. No endpoint accepts a practice identifier as a parameter; the practice always comes from the hostname.
 6. A standing `system/*` token does not exist in any practice by default.
+
+Status (10 Nov 2026): checks 1, 2 and 4 are verified (FHI-01, AUD-01 and the agent door). Check 5 holds for every
+endpoint we have written (`health.php`, `approvals.php`, the token route take no practice parameter; the practice comes
+from the hostname or the token's own site). Check 6 holds by default: provisioning sets `rest_system_scopes_api = 0`, so
+`system/*` scopes are not offered. Check 3 (a screen's endpoint and the equivalent API route agree) starts with the first
+converted screen (CLN-01); there is no pair yet to compare. Still to add: an automated test for 5 and 6 that runs against a fresh practice.
