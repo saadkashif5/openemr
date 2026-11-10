@@ -10,6 +10,8 @@
  *   php provision-practice.php create  --spec=practice.json [--clone] [--verify-url=http://localhost] [--secrets-file=PATH]
  *   php provision-practice.php status  <domain>
  *   php provision-practice.php list
+ *   php provision-practice.php apply-api-defaults <domain>   REST and FHIR on, site address set (new practices get this already)
+ *   php provision-practice.php rotate-oauth-keys <domain>    new OAuth signing keys (for a practice sharing a key)
  *   php provision-practice.php reset-admin <domain> [--username=NAME] [--secrets-file=PATH]
  *   php provision-practice.php destroy <domain> --confirm=<domain>
  *
@@ -232,6 +234,9 @@ final class Provisioner
     private function customGlobals(PracticeSpec $spec): array
     {
         $globals = [];
+        foreach (self::apiGlobals($spec->domain) as $key => $value) {
+            $globals[$key] = ['value' => $value];
+        }
         foreach ($this->templateGlobals($spec) as $key => $value) {
             $globals[$key] = ['value' => $value];
         }
@@ -240,6 +245,27 @@ final class Provisioner
         }
         $globals['openemr_name'] = ['value' => $spec->name];
         return $globals;
+    }
+
+    /**
+     * Standing API settings for every practice (see platform/ARCHITECTURE.md, sections 3 and 6): REST and FHIR
+     * on, so SMART apps and agents have an entry point; backend (system scope) tokens and the password grant
+     * off, because they are not tied to one user; the OAuth site address is the practice's own hostname.
+     * PROVISION_PUBLIC_SCHEME is https except in a local test stack. A specialty template or the spec can override.
+     *
+     * @return array<string, string>
+     */
+    private static function apiGlobals(string $domain): array
+    {
+        $scheme = getenv('PROVISION_PUBLIC_SCHEME') ?: 'https';
+        return [
+            'rest_api' => '1',
+            'rest_fhir_api' => '1',
+            'rest_portal_api' => '0',
+            'rest_system_scopes_api' => '0',
+            'oauth_password_grant' => '0',
+            'site_addr_oath' => "$scheme://$domain",
+        ];
     }
 
     private function install(PracticeSpec $spec, string $dbPass, string $adminPass): void
@@ -673,6 +699,70 @@ final class Provisioner
         $stmt->bind_param('is', $days, $username);
         $stmt->execute();
         return $stmt->affected_rows === 1;
+    }
+
+    /**
+     * Apply the standing API settings (apiGlobals) to a practice that already exists. Safe to repeat.
+     *
+     * @return array<string, mixed>
+     */
+    public function applyApiDefaults(string $domain): array
+    {
+        $lock = $this->lock($domain);
+        try {
+            $state = $this->readState($domain);
+            if ($state === null || ($state['status'] ?? '') !== 'active') {
+                throw new RuntimeException("$domain is not an active provisioned practice");
+            }
+            $link = $this->db->connect(null, null, (string) $state['db_name']);
+            $stmt = $link->prepare(
+                'INSERT INTO globals (gl_name, gl_index, gl_value) VALUES (?, 0, ?) ON DUPLICATE KEY UPDATE gl_value = VALUES(gl_value)'
+            );
+            $applied = self::apiGlobals($domain);
+            foreach ($applied as $name => $value) {
+                $stmt->bind_param('ss', $name, $value);
+                $stmt->execute();
+            }
+            $link->close();
+            $this->audit('apply-api-defaults', $domain);
+            return ['domain' => $domain, 'applied' => $applied];
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    /**
+     * Replace a practice's OAuth signing keys: remove the key files so OpenEMR creates a new pair, with its own
+     * passphrase, the next time the practice's OAuth endpoints are used. Tokens and codes issued before this
+     * stop working. Use it on practices that share a key with another site (created before the clean template).
+     *
+     * @return array<string, mixed>
+     */
+    public function rotateOauthKeys(string $domain): array
+    {
+        $lock = $this->lock($domain);
+        try {
+            $state = $this->readState($domain);
+            if ($state === null || ($state['status'] ?? '') !== 'active') {
+                throw new RuntimeException("$domain is not an active provisioned practice");
+            }
+            $removed = [];
+            foreach (['oaprivate.key', 'oapublic.key'] as $file) {
+                $path = "{$this->sitesDir}/$domain/documents/certificates/$file";
+                if (is_file($path) && unlink($path)) {
+                    $removed[] = $file;
+                }
+            }
+            $link = $this->db->connect(null, null, (string) $state['db_name']);
+            $link->query("DELETE FROM `keys` WHERE name IN ('oauth2key', 'oauth2passphrase')");
+            $link->close();
+            $this->audit('rotate-oauth-keys', $domain);
+            return ['domain' => $domain, 'removed' => $removed, 'next' => 'New keys are created on first OAuth use'];
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
     }
 
     /**
@@ -1111,6 +1201,8 @@ try {
             $provisioner->all()
         ),
         'build-golden' => $provisioner->buildGolden(),
+        'apply-api-defaults' => $provisioner->applyApiDefaults($args[1] ?? fail('apply-api-defaults needs a domain', 2)),
+        'rotate-oauth-keys' => $provisioner->rotateOauthKeys($args[1] ?? fail('rotate-oauth-keys needs a domain', 2)),
         'reset-admin' => $provisioner->resetAdmin(
             $args[1] ?? fail('reset-admin needs a domain', 2),
             $opts['username'] ?? null,
@@ -1123,7 +1215,7 @@ try {
             }
             return $provisioner->destroy($domain);
         })(),
-        default => fail("Usage: provision-practice.php create|build-golden|status|list|reset-admin|destroy (see header of this file)", 2),
+        default => fail("Usage: provision-practice.php create|build-golden|status|list|apply-api-defaults|rotate-oauth-keys|reset-admin|destroy (see header of this file)", 2),
     };
     echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";
 } catch (PracticeExistsException $e) {

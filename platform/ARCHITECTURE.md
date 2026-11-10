@@ -88,10 +88,15 @@ is deleted or exported with that practice.
   `site_addr_oath`. The mechanism exists (`globals` in the spec) but nothing sets them yet (FHI-01).
 - Each practice must have its own OAuth signing keys, created in its own
   `sites/<site>/documents/certificates/oaprivate.key`, never copied from another site, the golden database or
-  the image. **Observed locally (10 Nov 2026):** practices created from our clean site template get their own
-  key on first use (practice-h and practice-j differ), but `default` and practices created before the template
-  (practice-a, -b, -d) share one key. A token signed for one of those verifies for the others. FHI-01 must check
-  that every practice has a distinct key and replace any shared one.
+  the image. **Verified locally (10 Nov 2026, FHI-01):** practices created from our clean site template get
+  their own key on first OAuth use. Practices created before the template (practice-a, -b, -d) started with a
+  copy of `default`'s key, but OpenEMR replaced it by itself on their first OAuth use, because their database
+  had no key record. Even while a key was shared, a token from one practice was refused by the others (each
+  practice also checks tokens against its own database). `provision-practice.php rotate-oauth-keys <domain>`
+  forces a new pair (for a suspected leak); tokens issued before it stop working.
+- A client registered through the open registration endpoint starts **disabled** and cannot give itself the
+  password grant (OpenEMR's `ClientGrantTypePolicy`); an admin approves it. Agents inherit this: they cannot
+  self-approve or self-escalate.
 - HTTPS with a valid certificate on every practice hostname is required for OAuth (INF-05).
 
 ## 7. Real-time and AI scribing (later)

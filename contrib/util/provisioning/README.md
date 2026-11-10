@@ -144,6 +144,32 @@ newer than the code is skipped, never downgraded. Each practice is verified afte
 exit code is 1 if any failed. `site-upgrade.php` is the helper that points the stock `sql_upgrade.php`
 at one site (it otherwise only ever upgrades `default` from the command line).
 
+## API settings and signing keys (FHIR and SMART)
+
+Every new practice is created with the REST and FHIR APIs on (`rest_api`, `rest_fhir_api`), the portal API,
+backend (`system/*`) tokens and the password grant off, and `site_addr_oath` set to `https://<domain>`
+(`PROVISION_PUBLIC_SCHEME=http` in a local test stack). A specialty template or the spec's `globals` can override.
+
+```bash
+php provision-practice.php apply-api-defaults <domain>   # same settings, for a practice that already exists
+php provision-practice.php rotate-oauth-keys  <domain>   # new OAuth signing keys; older tokens stop working
+```
+
+Each practice keeps its own signing keys in `sites/<domain>/documents/certificates/`, created on first OAuth use.
+The site template contains none.
+
+**How FHI-01 was verified** (local stack only; the password grant is switched on for the test and off again):
+1. Create two practices; check both discovery documents answer (`/oauth2/<domain>/.well-known/openid-configuration`
+   and `/apis/<domain>/fhir/.well-known/smart-configuration`).
+2. Register an app (`POST /oauth2/<domain>/registration`). It starts disabled: an admin enables it, and an admin
+   adds the `password` grant (`oauth_clients.is_enabled`, `grant_types`), which a client cannot do for itself.
+3. Get a token with the password grant, create a patient through `/apis/<domain>/api/patient`, read it back
+   through `/apis/<domain>/fhir/Patient`.
+4. Present practice A's token to practice B: it must be refused (401). Compare
+   `md5sum sites/<domain>/documents/certificates/oaprivate.key` across practices: all different.
+
+Not covered: the interactive SMART launch with a browser (needs HTTPS and a real domain, INF-05).
+
 ## Background jobs
 
 Per-practice scheduled work already supports `--site`:
