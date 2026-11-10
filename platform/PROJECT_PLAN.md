@@ -108,7 +108,7 @@ mobile apps, e-prescribing, lab interfaces, migration of existing patient data.
 | D-13 | Classic OpenEMR pages are blocked for practice users once their replacement exists. The super admin keeps access to them as a safety net (to be confirmed, PLN-02) |
 | D-14 | Billing, CPT data and the clearinghouse are deferred and will be added later (see section 8a) |
 | D-15 | Specialty modules are built once and enabled per practice: Internal Medicine, Urgent Care, Behavioral Health, ASC. No client-specific code |
-| D-16 | **Proposed in ARC-01.** One service and permission layer (role plus practice) with two entry points: session endpoints for our own screens (D-09) and OpenEMR's OAuth, FHIR and SMART API for agents, MCP and third-party apps. Business logic lives in services, never in screens or routes |
+| D-16 | **Confirmed by the project owner on 10 Nov 2026; lead review pending (ARC-01).** One service and permission layer (role plus practice) with two entry points: session endpoints for our own screens (D-09) and OpenEMR's OAuth, FHIR and SMART API for agents, MCP and third-party apps. Business logic lives in services, never in screens or routes |
 
 ---
 
@@ -383,6 +383,7 @@ human approval for sensitive actions. Only the foundation is built now; the rest
 - **ARC-01 Write architecture decisions for AI and interoperability** · S · P1 · M1 · depends: none
   One page `platform/ARCHITECTURE.md` fixing the service layer with two entry points, agent identity, the approval model, the audit model and tenant isolation for agents. Resolve the D-09 wording against the client's "single API layer".
   Done when: the page is reviewed by the lead; D-16 confirmed or changed; open questions in section 8b answered or owned.
+  **Status (10 Nov 2026): draft written; D-16 confirmed and questions 1 to 3 answered or owned by the project owner. Remaining: lead review.**
 - **FHI-01 Enable and verify FHIR and SMART per practice** · M · P2 · M1 · depends: ARC-01, TEN-03
   Provisioning turns on the REST and FHIR APIs and sets each practice's site address by default. Register a test SMART app and check the multi-practice issuer and key setup.
   Done when: a SMART test app reads a Patient from practice A; the same token is refused by practice B; every practice has its own signing keys.
@@ -581,9 +582,9 @@ audit trails and human approval for sensitive actions. Tickets: ARC-01, FHI-01, 
 | Human approval, audit | Phase 1 foundation | Pending-approval table, agent actor, correlation ID (AUD-01) | `log` with checksum, `api_log`; no approvals |
 
 **Open questions**
-1. **Charge capture.** The client message and the lead's reply say charge capture is in Phase 1; D-14 defers billing. Settle which in writing.
-2. **AI provider and patient data.** Sending PHI to a model needs a signed BAA with the provider. Options: AWS Bedrock under the AWS BAA, or the provider's own BAA. The pilot region (eu-north-1) has limited model availability, and cross-region inference would move data. Decide before any AI feature touches patient data.
-3. **Data region.** Same question as section 5 (is hosting US practices' data in Stockholm acceptable).
+1. **Charge capture.** *Answered 10 Nov 2026 by the project owner:* it comes later. D-14 stands; the lead's wording ("charge capture in Phase 1 will produce standard claim data") is read as a future capability. Confirm with the client in writing that Phase 1 excludes charge capture.
+2. **AI provider and patient data.** *Owner: the project owner (decision still to be made).* Sending PHI to a model needs a signed BAA with the provider. Options: AWS Bedrock under the AWS BAA, or the provider's own BAA. The pilot region (eu-north-1) has limited model availability, and cross-region inference would move data. Decide before any AI feature touches patient data.
+3. **Data region.** *Owner: the project owner (decision still to be made).* Same question as section 5 (is hosting US practices' data in Stockholm acceptable).
 4. **Who owns agent credentials?** Per practice and per user, issued and revoked by the practice admin; the super admin never receives a standing agent token.
 5. **Log retention.** `api_log` stores full request and response bodies (copies of patient data); choose what to keep and for how long.
 

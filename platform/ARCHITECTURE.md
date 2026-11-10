@@ -1,7 +1,8 @@
 # Architecture: AI-ready foundation
 
-Status: **draft for review by the lead** (ticket ARC-01). Decisions D-16 and the questions in
-`PROJECT_PLAN.md` section 8b depend on this page.
+Status: **draft for review by the lead** (ticket ARC-01). D-16 was confirmed by the project owner on
+10 Nov 2026. Charge capture stays deferred (D-14). The AI provider and data region are the project owner's
+decisions and are still open (`PROJECT_PLAN.md` section 8b).
 
 The client wants the EHR to be AI-native from day one without slowing the MVP. This page fixes the few
 structural rules that make later AI work possible. It does not design any AI feature.
